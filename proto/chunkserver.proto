@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package gfs;
+
+option go_package = "github.com/Lord-OfShadows/gfs/proto/gfspb";
+
+import "common.proto";
+
+// ChunkServerService is the data plane: it moves and stores chunk bytes.
+service ChunkServerService {
+  // WriteChunk receives one chunk as a stream: a header message first, then
+  // data frames. It replies once, after the checksum is verified and the
+  // bytes are persisted (and forwarded, if forward_to is set).
+  rpc WriteChunk(stream WriteChunkRequest) returns (WriteChunkResponse);
+
+  // ReadChunk streams a stored chunk back: a header message first, then data
+  // frames. The client verifies the checksum after reassembling.
+  rpc ReadChunk(ReadChunkRequest) returns (stream ReadChunkResponse);
+
+  // DeleteChunk removes a chunk's bytes from local disk. Deleting a missing
+  // chunk succeeds, so retries are safe.
+  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
+
+  // CopyChunk tells this chunkserver (the repair destination) to pull a chunk
+  // from a source replica, verify its checksum, and store it.
+  rpc CopyChunk(CopyChunkRequest) returns (CopyChunkResponse);
+
+  // GetHealth reports this node's identity and load; used by the CLI status
+  // command and for debugging.
+  rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
+}
+
+// Sent as the first message of a WriteChunk stream.
+message WriteChunkHeader {
+  // Client-generated ID, reused on retries. A server that already completed
+  // this operation returns the original result instead of writing again.
+  string operation_id = 1;
+  ChunkInfo chunk = 2;                    // expected id, length, and checksum
+  repeated ReplicaLocation forward_to = 3; // replicas to pipeline to; empty = none
+}
+
+message WriteChunkRequest {
+  oneof payload {
+    WriteChunkHeader header = 1; // first message only
+    bytes data = 2;              // every following message
+  }
+}
+
+message WriteChunkResponse {
+  string chunk_id = 1;
+  int64 bytes_written = 2;
+}
+
+message ReadChunkRequest {
+  string chunk_id = 1;
+}
+
+message ReadChunkResponse {
+  oneof payload {
+    ChunkInfo header = 1; // first message: length and stored checksum
+    bytes data = 2;       // every following message
+  }
+}
+
+message DeleteChunkRequest {
+  string chunk_id = 1;
+}
+
+message DeleteChunkResponse {}
+
+message CopyChunkRequest {
+  ChunkInfo chunk = 1;          // expected checksum the copy must match
+  ReplicaLocation source = 2;   // healthy replica to read from
+}
+
+message CopyChunkResponse {
+  string chunk_id = 1;
+  int64 bytes_copied = 2;
+}
+
+message GetHealthRequest {}
+
+message GetHealthResponse {
+  string node_id = 1;
+  NodeStats stats = 2;
+}

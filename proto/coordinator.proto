@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package gfs;
+
+option go_package = "github.com/Lord-OfShadows/gfs/proto/gfspb";
+
+import "common.proto";
+
+// CoordinatorService is the metadata plane: namespace, chunk map, and node
+// liveness. It never carries chunk bytes.
+service CoordinatorService {
+  // CreateFile registers a new file path and returns where each chunk should
+  // be written. The file becomes visible only after enough replicas are reported.
+  rpc CreateFile(CreateFileRequest) returns (CreateFileResponse);
+
+  // GetFileMetadata returns a file's ordered chunks and their replica locations
+  // so the client can read them directly from chunkservers.
+  rpc GetFileMetadata(GetFileMetadataRequest) returns (GetFileMetadataResponse);
+
+  // ListFiles returns the visible files whose paths start with a prefix.
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+
+  // DeleteFile logically deletes a file; replica cleanup happens afterwards.
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+
+  // Heartbeat is sent periodically by each chunkserver to prove liveness.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // ReportChunk is sent by a chunkserver after it durably stores a chunk
+  // (from a write or a repair copy), and on restart to reconcile its inventory.
+  rpc ReportChunk(ReportChunkRequest) returns (ReportChunkResponse);
+}
+
+// Length and checksum of one chunk the client intends to upload.
+// The chunk's index is its position in CreateFileRequest.chunks.
+message ChunkSpec {
+  int64 length = 1;
+  bytes checksum = 2; // SHA-256
+}
+
+message CreateFileRequest {
+  string path = 1;
+  int64 size_bytes = 2;
+  repeated ChunkSpec chunks = 3;
+}
+
+message CreateFileResponse {
+  string file_id = 1;
+  repeated ChunkPlacement chunks = 2; // in file order; chunk_id filled in by coordinator
+}
+
+message GetFileMetadataRequest {
+  string path = 1;
+}
+
+message FileMetadata {
+  string path = 1;
+  string file_id = 2;
+  int64 size_bytes = 3;
+  int64 created_at_unix_ms = 4;
+  uint64 version = 5;
+  repeated ChunkPlacement chunks = 6; // in file order
+}
+
+message GetFileMetadataResponse {
+  FileMetadata file = 1;
+}
+
+message ListFilesRequest {
+  string prefix = 1; // empty lists everything
+}
+
+message FileSummary {
+  string path = 1;
+  int64 size_bytes = 2;
+  int64 created_at_unix_ms = 3;
+}
+
+message ListFilesResponse {
+  repeated FileSummary files = 1;
+}
+
+message DeleteFileRequest {
+  string path = 1;
+  optional uint64 expected_version = 2; // if set, delete only if version matches
+}
+
+message DeleteFileResponse {}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  string address = 2; // where clients and peers can reach this chunkserver
+  NodeStats stats = 3;
+}
+
+message HeartbeatResponse {
+  NodeState state = 1;              // how the coordinator currently sees this node
+  int64 heartbeat_interval_ms = 2;  // lets the coordinator tune the interval
+}
+
+message ReportChunkRequest {
+  string node_id = 1;
+  ChunkInfo chunk = 2;
+}
+
+message ReportChunkResponse {}

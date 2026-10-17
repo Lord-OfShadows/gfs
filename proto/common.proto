@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package gfs;
+
+option go_package = "github.com/Lord-OfShadows/gfs/proto/gfspb";
+
+// Liveness of a chunkserver as seen by the coordinator.
+// Timeouts mean suspicion, not certainty: HEALTHY -> SUSPECT -> UNAVAILABLE.
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0; // proto3 default; never set deliberately
+  NODE_STATE_HEALTHY = 1;
+  NODE_STATE_SUSPECT = 2;     // missed some heartbeats; not used for new placements
+  NODE_STATE_UNAVAILABLE = 3; // past the timeout; excluded from reads, triggers repair
+}
+
+// Immutable description of one chunk of a file.
+message ChunkInfo {
+  string chunk_id = 1; // assigned by the coordinator; also the on-disk name
+  uint32 index = 2;    // position of the chunk within its file, starting at 0
+  int64 length = 3;    // bytes in this chunk (<= chunk size; last chunk may be shorter)
+  bytes checksum = 4;  // raw SHA-256 digest (32 bytes) of the chunk contents
+}
+
+// Where one replica of a chunk lives.
+message ReplicaLocation {
+  string node_id = 1;
+  string address = 2; // host:port of the chunkserver's gRPC endpoint
+  NodeState state = 3;
+}
+
+// A chunk plus the replicas that hold (or should hold) it.
+// By convention replicas[0] is the primary for writes.
+message ChunkPlacement {
+  ChunkInfo chunk = 1;
+  repeated ReplicaLocation replicas = 2;
+}
+
+// Capacity and load of a chunkserver; sent in heartbeats and health checks.
+message NodeStats {
+  int64 capacity_bytes = 1;
+  int64 used_bytes = 2;
+  int64 chunk_count = 3;
+}

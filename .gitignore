@@ -1,0 +1,22 @@
+# Build output
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+
+# Local chunk/metadata storage
+/data/
+*.db
+
+# Secrets and editor/OS noise
+.env
+.env.*
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
