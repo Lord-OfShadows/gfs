@@ -1,8 +1,11 @@
 package chunkserver
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"io"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -10,6 +13,8 @@ import (
 
 	"github.com/Lord-OfShadows/gfs/proto/gfspb"
 )
+
+const maxChunkSize = 64 << 20 // 64 MiB
 
 // Server implements gfspb.ChunkServerServiceServer on top of a Store.
 type Server struct {
@@ -29,12 +34,65 @@ func NewServer(nodeID string, store *Store) *Server {
 // WriteChunk receives a header message followed by data frames, verifies the
 // checksum, and persists the chunk.
 func (s *Server) WriteChunk(stream grpc.ClientStreamingServer[gfspb.WriteChunkRequest, gfspb.WriteChunkResponse]) error {
-	// TODO(arjun): implement.
-	//   1. stream.Recv() the first message; it must be a header (else InvalidArgument).
-	//   2. Recv() data frames until io.EOF, appending bytes and enforcing header.chunk.length.
-	//   3. Verify SHA-256 against header.chunk.checksum (mismatch -> DataLoss or InvalidArgument).
-	//   4. s.store.Write, then stream.SendAndClose(&gfspb.WriteChunkResponse{...}).
-	return status.Error(codes.Unimplemented, "WriteChunk not implemented")
+
+	// First Message recieved must be the header
+	first, err := stream.Recv()
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "recieve header: %v", err)
+	}
+
+	header := first.GetHeader()
+	if header == nil || header.GetChunk() == nil {
+		return status.Error(codes.InvalidArgument, "First message must be a header with chunk info")
+	}
+
+	info := header.GetChunk()
+	want := info.GetLength()
+	if want < 0 || want > maxChunkSize {
+		return status.Errorf(codes.InvalidArgument, "invalid chunk length %d", want)
+	}
+
+	// Recieve data untill client says "done"
+	buf := make([]byte, 0, want)
+	for {
+		msg, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break // Client finished sending data
+		}
+		if err != nil {
+			return err // connection broke or client cancelled
+		}
+
+		if msg.GetHeader() != nil {
+			return status.Error(codes.InvalidArgument, "unexpected 2nd header")
+		}
+		data := msg.GetData()
+		if int64(len(buf)+len(data)) > want {
+			return status.Errorf(codes.InvalidArgument, "recieved more data than %d bytes", want)
+		}
+
+		buf = append(buf, data...)
+	}
+
+	// We get exactly what was expected
+	if int64(len(buf)) != want {
+		return status.Errorf(codes.InvalidArgument, "recieved %d bytes, expected %d", len(buf), want)
+	}
+
+	sum := sha256.Sum256(buf)
+	if !bytes.Equal(sum[:], info.GetChecksum()) {
+		return status.Error(codes.DataLoss, "checksum mismatch ;  Data corrupted in transit")
+	}
+
+	// Save to Disk; Then Reply
+	if err := s.store.Write(info.GetChunkId(), buf); err != nil {
+		return toStatus(err)
+	}
+
+	return stream.SendAndClose(&gfspb.WriteChunkResponse{
+		ChunkId:      info.GetChunkId(),
+		BytesWritten: int64(len(buf)),
+	})
 }
 
 // ReadChunk streams a stored chunk: a header message, then data frames.
