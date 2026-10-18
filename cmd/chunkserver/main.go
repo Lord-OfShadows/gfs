@@ -1,8 +1,59 @@
 // Command chunkserver runs a GFS storage node that holds chunk bytes.
 package main
 
-import "fmt"
+import (
+	"context"
+	"flag"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"google.golang.org/grpc"
+
+	"github.com/Lord-OfShadows/gfs/internal/chunkserver"
+	"github.com/Lord-OfShadows/gfs/proto/gfspb"
+)
 
 func main() {
-	fmt.Println("chunkserver started")
+	addr := flag.String("addr", ":7001", "address to listen on (host:port)")
+	dataDir := flag.String("data-dir", "./data/cs1", "directory where chunk files are stored")
+	nodeID := flag.String("node-id", "cs1", "unique ID of this chunkserver")
+	flag.Parse()
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("node_id", *nodeID)
+	slog.SetDefault(logger)
+
+	if err := run(*addr, *dataDir, *nodeID); err != nil {
+		slog.Error("chunkserver exited", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run(addr, dataDir, nodeID string) error {
+	store, err := chunkserver.NewStore(dataDir)
+	if err != nil {
+		return err
+	}
+
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	grpcServer := grpc.NewServer()
+	gfspb.RegisterChunkServerServiceServer(grpcServer, chunkserver.NewServer(nodeID, store))
+
+	// Stop cleanly on Ctrl+C (SIGINT) or SIGTERM (what `docker stop` sends).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		slog.Info("shutting down")
+		grpcServer.GracefulStop()
+	}()
+
+	slog.Info("chunkserver started", "addr", lis.Addr().String(), "data_dir", dataDir)
+	return grpcServer.Serve(lis)
 }
