@@ -16,6 +16,8 @@ import (
 
 const maxChunkSize = 64 << 20 // 64 MiB
 
+const frameSize = 64 << 10 // 64 KiB per data message
+
 // Server implements gfspb.ChunkServerServiceServer on top of a Store.
 type Server struct {
 	// Embedded by value: supplies an "Unimplemented" answer for every RPC we
@@ -97,11 +99,38 @@ func (s *Server) WriteChunk(stream grpc.ClientStreamingServer[gfspb.WriteChunkRe
 
 // ReadChunk streams a stored chunk: a header message, then data frames.
 func (s *Server) ReadChunk(req *gfspb.ReadChunkRequest, stream grpc.ServerStreamingServer[gfspb.ReadChunkResponse]) error {
-	// TODO(arjun): implement.
-	//   1. s.store.Read(req.GetChunkId()); map ErrChunkNotFound -> NotFound.
-	//   2. stream.Send a header with id, length, and SHA-256 checksum.
-	//   3. stream.Send the bytes in fixed-size frames (e.g. 64 KiB).
-	return status.Error(codes.Unimplemented, "ReadChunk not implemented")
+	// Load the chunk from disk
+	data, err := s.store.Read(req.GetChunkId())
+	if err != nil {
+		return toStatus(err)
+	}
+
+	// Send Header First
+	sum := sha256.Sum256(data)
+	header := &gfspb.ReadChunkResponse{
+		Payload: &gfspb.ReadChunkResponse_Header{
+			Header: &gfspb.ChunkInfo{
+				ChunkId:  req.GetChunkId(),
+				Length:   int64(len(data)),
+				Checksum: sum[:],
+			},
+		},
+	}
+	if err := stream.Send(header); err != nil {
+		return err
+	}
+
+	// Send Data in 64Kb pieces/frames
+	for start := 0; start < len(data); start += frameSize {
+		end := min(start+frameSize, len(data))
+		msg := &gfspb.ReadChunkResponse{
+			Payload: &gfspb.ReadChunkResponse_Data{Data: data[start:end]},
+		}
+		if err := stream.Send(msg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteChunk removes a chunk from local disk. Deleting a missing chunk succeeds.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"net"
 	"path/filepath"
 	"testing"
@@ -177,6 +178,121 @@ func TestWriteChunk(t *testing.T) {
 			}
 			if !bytes.Equal(got, data) {
 				t.Fatalf("stored %d bytes, want the %d bytes that were sent", len(got), len(data))
+			}
+		})
+	}
+}
+
+// readChunk calls ReadChunk and collects the whole response stream: every
+// message in order, until the server ends the stream. A non-nil error is the
+// server's gRPC status (e.g. NotFound) or a transport failure.
+func readChunk(t *testing.T, client gfspb.ChunkServerServiceClient, id string) ([]*gfspb.ReadChunkResponse, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream, err := client.ReadChunk(ctx, &gfspb.ReadChunkRequest{ChunkId: id})
+	if err != nil {
+		return nil, err
+	}
+	var msgs []*gfspb.ReadChunkResponse
+	for {
+		msg, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return msgs, nil // server finished normally
+		}
+		if err != nil {
+			return msgs, err // server returned an error status
+		}
+		msgs = append(msgs, msg)
+	}
+}
+
+func TestReadChunk(t *testing.T) {
+	const maxFrame = 64 << 10 // the protocol's per-message data limit
+
+	t.Run("round trip", func(t *testing.T) {
+		sizes := []struct {
+			name string
+			size int
+		}{
+			{name: "empty", size: 0},
+			{name: "one byte", size: 1},
+			{name: "exactly 64 KiB", size: 64 << 10},
+			{name: "64 KiB plus 1", size: 64<<10 + 1},
+			{name: "4 MiB", size: 4 << 20},
+		}
+
+		for _, tc := range sizes {
+			t.Run(tc.name, func(t *testing.T) {
+				client, store := startTestServer(t)
+				const id = "chunk-read"
+				data := pattern(tc.size)
+				if err := store.Write(id, data); err != nil {
+					t.Fatalf("store.Write: %v", err)
+				}
+
+				msgs, err := readChunk(t, client, id)
+				if err != nil {
+					t.Fatalf("ReadChunk: %v", err)
+				}
+				if len(msgs) == 0 {
+					t.Fatal("ReadChunk sent no messages, want a header first")
+				}
+
+				// First message: header describing the whole chunk.
+				header := msgs[0].GetHeader()
+				if header == nil {
+					t.Fatalf("first message is %T, want a header", msgs[0].GetPayload())
+				}
+				if header.GetChunkId() != id {
+					t.Errorf("header chunk_id = %q, want %q", header.GetChunkId(), id)
+				}
+				if header.GetLength() != int64(len(data)) {
+					t.Errorf("header length = %d, want %d", header.GetLength(), len(data))
+				}
+				if !bytes.Equal(header.GetChecksum(), sha(data)) {
+					t.Errorf("header checksum = %x, want SHA-256 %x", header.GetChecksum(), sha(data))
+				}
+
+				// Every following message: a data frame of at most 64 KiB.
+				var got []byte
+				for i, m := range msgs[1:] {
+					frame, ok := m.GetPayload().(*gfspb.ReadChunkResponse_Data)
+					if !ok {
+						t.Fatalf("message %d is %T, want data", i+1, m.GetPayload())
+					}
+					if len(frame.Data) > maxFrame {
+						t.Errorf("message %d has %d bytes, want at most %d", i+1, len(frame.Data), maxFrame)
+					}
+					got = append(got, frame.Data...)
+				}
+
+				if !bytes.Equal(got, data) {
+					t.Fatalf("reassembled %d bytes, want the %d bytes that were stored", len(got), len(data))
+				}
+			})
+		}
+	})
+
+	errorCases := []struct {
+		name     string
+		id       string
+		wantCode codes.Code
+	}{
+		{name: "missing chunk", id: "does-not-exist", wantCode: codes.NotFound},
+		{name: "invalid chunk ID", id: "../evil", wantCode: codes.InvalidArgument},
+	}
+	for _, tc := range errorCases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _ := startTestServer(t)
+
+			msgs, err := readChunk(t, client, tc.id)
+			if got := status.Code(err); got != tc.wantCode {
+				t.Fatalf("ReadChunk(%q) code = %v (err: %v), want %v", tc.id, got, err, tc.wantCode)
+			}
+			if len(msgs) != 0 {
+				t.Errorf("ReadChunk(%q) sent %d messages before failing, want 0", tc.id, len(msgs))
 			}
 		})
 	}
