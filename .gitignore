@@ -11,6 +11,7 @@ coverage.*
 
 # Local chunk/metadata storage
 /data/
+/.gfs/
 *.db
 
 # Secrets and editor/OS noise
