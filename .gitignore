@@ -21,3 +21,6 @@ coverage.*
 .vscode/
 .DS_Store
 Thumbs.db
+
+# local test downloads
+/out*
