@@ -76,10 +76,13 @@ func (x *ChunkSpec) GetChecksum() []byte {
 }
 
 type CreateFileRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	SizeBytes     int64                  `protobuf:"varint,2,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	Chunks        []*ChunkSpec           `protobuf:"bytes,3,rep,name=chunks,proto3" json:"chunks,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Path      string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	SizeBytes int64                  `protobuf:"varint,2,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	Chunks    []*ChunkSpec           `protobuf:"bytes,3,rep,name=chunks,proto3" json:"chunks,omitempty"`
+	// Client-generated ID, reused on retries, so a retried CreateFile returns
+	// the original file and chunk IDs instead of creating a second file.
+	OperationId   string `protobuf:"bytes,4,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -133,6 +136,13 @@ func (x *CreateFileRequest) GetChunks() []*ChunkSpec {
 		return x.Chunks
 	}
 	return nil
+}
+
+func (x *CreateFileRequest) GetOperationId() string {
+	if x != nil {
+		return x.OperationId
+	}
+	return ""
 }
 
 type CreateFileResponse struct {
@@ -802,12 +812,13 @@ const file_coordinator_proto_rawDesc = "" +
 	"\x11coordinator.proto\x12\x03gfs\x1a\fcommon.proto\"?\n" +
 	"\tChunkSpec\x12\x16\n" +
 	"\x06length\x18\x01 \x01(\x03R\x06length\x12\x1a\n" +
-	"\bchecksum\x18\x02 \x01(\fR\bchecksum\"n\n" +
+	"\bchecksum\x18\x02 \x01(\fR\bchecksum\"\x91\x01\n" +
 	"\x11CreateFileRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1d\n" +
 	"\n" +
 	"size_bytes\x18\x02 \x01(\x03R\tsizeBytes\x12&\n" +
-	"\x06chunks\x18\x03 \x03(\v2\x0e.gfs.ChunkSpecR\x06chunks\"Z\n" +
+	"\x06chunks\x18\x03 \x03(\v2\x0e.gfs.ChunkSpecR\x06chunks\x12!\n" +
+	"\foperation_id\x18\x04 \x01(\tR\voperationId\"Z\n" +
 	"\x12CreateFileResponse\x12\x17\n" +
 	"\afile_id\x18\x01 \x01(\tR\x06fileId\x12+\n" +
 	"\x06chunks\x18\x02 \x03(\v2\x13.gfs.ChunkPlacementR\x06chunks\",\n" +

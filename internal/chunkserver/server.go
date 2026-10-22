@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -18,6 +19,8 @@ const maxChunkSize = 64 << 20 // 64 MiB
 
 const frameSize = 64 << 10 // 64 KiB per data message
 
+const reportTimeout = 5 * time.Second // deadline for each ReportChunk call to the coordinator
+
 // Server implements gfspb.ChunkServerServiceServer on top of a Store.
 type Server struct {
 	// Embedded by value: supplies an "Unimplemented" answer for every RPC we
@@ -26,11 +29,19 @@ type Server struct {
 
 	nodeID string
 	store  *Store
+	coord  gfspb.CoordinatorServiceClient // nil = no coordinator (standalone mode, tests)
 }
 
 // NewServer returns a Server that identifies itself as nodeID.
 func NewServer(nodeID string, store *Store) *Server {
 	return &Server{nodeID: nodeID, store: store}
+}
+
+// SetCoordinator sets the coordinator this chunkserver reports stored chunks
+// to. Call it before the gRPC server starts serving: handlers read s.coord
+// without a lock, which is only safe if it never changes while they run.
+func (s *Server) SetCoordinator(c gfspb.CoordinatorServiceClient) {
+	s.coord = c
 }
 
 // WriteChunk receives a header message followed by data frames, verifies the
@@ -89,6 +100,23 @@ func (s *Server) WriteChunk(stream grpc.ClientStreamingServer[gfspb.WriteChunkRe
 	// Save to Disk; Then Reply
 	if err := s.store.Write(info.GetChunkId(), buf); err != nil {
 		return toStatus(err)
+	}
+
+	// Tell the coordinator we have this chunk
+	if s.coord != nil {
+		ctx, cancel := context.WithTimeout(stream.Context(), reportTimeout)
+		defer cancel()
+		_, err := s.coord.ReportChunk(ctx, &gfspb.ReportChunkRequest{
+			NodeId: s.nodeID,
+			Chunk: &gfspb.ChunkInfo{
+				ChunkId:  info.GetChunkId(),
+				Length:   int64(len(buf)),
+				Checksum: sum[:],
+			},
+		})
+		if err != nil {
+			return status.Errorf(status.Code(err), "stored chunk but could not report it to coordinator: %v", err)
+		}
 	}
 
 	return stream.SendAndClose(&gfspb.WriteChunkResponse{

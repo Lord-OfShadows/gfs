@@ -1,7 +1,9 @@
 // Command gfs is the CLI client.
 //
-//	gfs upload <file> [--addr localhost:7001] [--manifest-dir .gfs/manifests]
-//	gfs download <name> <out-path> [--addr localhost:7001] [--manifest-dir .gfs/manifests]
+//	gfs upload <file>              [--coordinator localhost:7000]
+//	gfs download <name> <out-path> [--coordinator localhost:7000]
+//	gfs ls [prefix]                [--coordinator localhost:7000]
+//	gfs rm <name>                  [--coordinator localhost:7000]
 package main
 
 import (
@@ -10,20 +12,22 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/Lord-OfShadows/gfs/internal/client"
 )
 
 const (
-	defaultAddr        = "localhost:7001"
-	defaultManifestDir = ".gfs/manifests"
+	defaultCoordinator = "localhost:7000"
 	opTimeout          = 60 * time.Second
 )
 
 const usage = `usage:
-  gfs upload <file> [--addr localhost:7001] [--manifest-dir .gfs/manifests]
-  gfs download <name> <out-path> [--addr localhost:7001] [--manifest-dir .gfs/manifests]
+  gfs upload <file>              [--coordinator localhost:7000]
+  gfs download <name> <out-path> [--coordinator localhost:7000]
+  gfs ls [prefix]                [--coordinator localhost:7000]
+  gfs rm <name>                  [--coordinator localhost:7000]
 `
 
 // errUsage marks errors caused by bad command-line arguments (exit code 2).
@@ -41,6 +45,10 @@ func main() {
 		err = runUpload(os.Args[2:])
 	case "download":
 		err = runDownload(os.Args[2:])
+	case "ls":
+		err = runList(os.Args[2:])
+	case "rm":
+		err = runRemove(os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return
@@ -58,81 +66,125 @@ func main() {
 	}
 }
 
-func runUpload(args []string) error {
-	fs := flag.NewFlagSet("upload", flag.ContinueOnError)
-	addr := fs.String("addr", defaultAddr, "chunkserver address")
-	manifestDir := fs.String("manifest-dir", defaultManifestDir, "where manifests are stored")
+// command holds what every subcommand needs: a connected client and a deadline.
+type command struct {
+	client *client.Client
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (c *command) close() {
+	c.cancel()
+	c.client.Close()
+}
+
+// setup parses flags for a subcommand, checks the number of positional
+// arguments is between minArgs and maxArgs, and connects to the coordinator.
+func setup(name string, args []string, minArgs, maxArgs int) (*command, []string, error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	coordAddr := fs.String("coordinator", defaultCoordinator, "coordinator address")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if len(pos) != 1 {
-		return fmt.Errorf("%w: upload takes exactly 1 argument, got %d", errUsage, len(pos))
+	if len(pos) < minArgs || len(pos) > maxArgs {
+		return nil, nil, fmt.Errorf("%w: %s takes %s, got %d", errUsage, name, argCount(minArgs, maxArgs), len(pos))
 	}
-	path := pos[0]
 
-	c, err := client.New(*addr)
+	c, err := client.New(*coordAddr)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
-	defer cancel()
+	return &command{client: c, ctx: ctx, cancel: cancel}, pos, nil
+}
 
-	start := time.Now()
-	m, err := c.Upload(ctx, path)
-	if err != nil {
-		return fmt.Errorf("upload %s: %w", path, err)
+func argCount(minArgs, maxArgs int) string {
+	if minArgs == maxArgs {
+		return fmt.Sprintf("exactly %d argument(s)", minArgs)
 	}
-	if err := client.SaveManifest(*manifestDir, m); err != nil {
+	return fmt.Sprintf("%d to %d arguments", minArgs, maxArgs)
+}
+
+func runUpload(args []string) error {
+	cmd, pos, err := setup("upload", args, 1, 1)
+	if err != nil {
 		return err
+	}
+	defer cmd.close()
+
+	localPath := pos[0]
+	start := time.Now()
+	info, err := cmd.client.Upload(cmd.ctx, localPath, filepath.Base(localPath))
+	if err != nil {
+		return fmt.Errorf("upload %s: %w", localPath, err)
 	}
 	fmt.Printf("uploaded %s: %d chunks, %d bytes in %s\n",
-		m.Name, len(m.Chunks), m.Size, time.Since(start).Round(time.Millisecond))
+		info.Path, len(info.Chunks), info.Size, time.Since(start).Round(time.Millisecond))
 	return nil
 }
 
 func runDownload(args []string) error {
-	fs := flag.NewFlagSet("download", flag.ContinueOnError)
-	addr := fs.String("addr", defaultAddr, "chunkserver address")
-	manifestDir := fs.String("manifest-dir", defaultManifestDir, "where manifests are stored")
-	pos, err := parseArgs(fs, args)
+	cmd, pos, err := setup("download", args, 2, 2)
 	if err != nil {
 		return err
 	}
-	if len(pos) != 2 {
-		return fmt.Errorf("%w: download takes exactly 2 arguments, got %d", errUsage, len(pos))
-	}
+	defer cmd.close()
+
 	name, outPath := pos[0], pos[1]
-
-	m, err := client.LoadManifest(*manifestDir, name)
-	if err != nil {
-		return err
-	}
-
-	c, err := client.New(*addr)
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
-	defer cancel()
-
 	start := time.Now()
-	if err := c.Download(ctx, m, outPath); err != nil {
+	if err := cmd.client.Download(cmd.ctx, name, outPath); err != nil {
 		return fmt.Errorf("download %s: %w", name, err)
 	}
-	fmt.Printf("downloaded %s -> %s: %d chunks, %d bytes in %s\n",
-		m.Name, outPath, len(m.Chunks), m.Size, time.Since(start).Round(time.Millisecond))
+	var size int64
+	if st, err := os.Stat(outPath); err == nil {
+		size = st.Size()
+	}
+	fmt.Printf("downloaded %s -> %s: %d bytes in %s\n",
+		name, outPath, size, time.Since(start).Round(time.Millisecond))
+	return nil
+}
+
+func runList(args []string) error {
+	cmd, pos, err := setup("ls", args, 0, 1)
+	if err != nil {
+		return err
+	}
+	defer cmd.close()
+
+	prefix := ""
+	if len(pos) == 1 {
+		prefix = pos[0]
+	}
+	files, err := cmd.client.List(cmd.ctx, prefix)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		fmt.Printf("%12d  %s\n", f.Size, f.Path)
+	}
+	fmt.Printf("%d file(s)\n", len(files))
+	return nil
+}
+
+func runRemove(args []string) error {
+	cmd, pos, err := setup("rm", args, 1, 1)
+	if err != nil {
+		return err
+	}
+	defer cmd.close()
+
+	if err := cmd.client.Delete(cmd.ctx, pos[0]); err != nil {
+		return err
+	}
+	fmt.Printf("deleted %s\n", pos[0])
 	return nil
 }
 
 // parseArgs parses flags that may appear before, between, or after the
 // positional arguments. Go's flag package stops at the first non-flag
-// argument, so `gfs upload a.txt --addr x` would otherwise treat "--addr" as
-// a file name. We parse, take one positional, and parse the rest again.
+// argument, so `gfs upload a.txt --coordinator x` would otherwise treat
+// "--coordinator" as a file name. We parse, take one positional, and repeat.
 func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	var positional []string
 	for {
