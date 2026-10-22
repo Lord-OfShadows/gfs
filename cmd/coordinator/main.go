@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/Lord-OfShadows/gfs/internal/coordinator"
+	"github.com/Lord-OfShadows/gfs/internal/grpclog"
 	"github.com/Lord-OfShadows/gfs/proto/gfspb"
 )
 
@@ -40,7 +41,10 @@ func run(addr string, chunkservers []string) error {
 		return err
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(grpclog.UnaryServerInterceptor),
+		grpc.ChainStreamInterceptor(grpclog.StreamServerInterceptor),
+	)
 	gfspb.RegisterCoordinatorServiceServer(grpcServer, coordinator.NewServer(coordinator.NewMetadata(), chunkservers))
 
 	// Stop cleanly on Ctrl+C (SIGINT) or SIGTERM (what `docker stop` sends).

@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/Lord-OfShadows/gfs/internal/chunkserver"
+	"github.com/Lord-OfShadows/gfs/internal/grpclog"
 	"github.com/Lord-OfShadows/gfs/proto/gfspb"
 )
 
@@ -59,7 +60,10 @@ func run(addr, dataDir, nodeID, coordAddr string) error {
 		return err
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(grpclog.UnaryServerInterceptor),
+		grpc.ChainStreamInterceptor(grpclog.StreamServerInterceptor),
+	)
 	gfspb.RegisterChunkServerServiceServer(grpcServer, srv)
 
 	// Stop cleanly on Ctrl+C (SIGINT) or SIGTERM (what `docker stop` sends).
