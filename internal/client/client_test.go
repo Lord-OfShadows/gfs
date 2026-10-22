@@ -8,49 +8,98 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/Lord-OfShadows/gfs/internal/chunkserver"
+	"github.com/Lord-OfShadows/gfs/internal/coordinator"
 	"github.com/Lord-OfShadows/gfs/proto/gfspb"
 )
 
-// startChunkserver runs a real chunkserver over an in-memory connection and
-// returns a Client connected to it plus the server's Store, so tests can
-// inspect or tamper with what is on "disk".
-func startChunkserver(t *testing.T) (*Client, *chunkserver.Store) {
+// testChunkserverAddr is the address the coordinator hands out for the
+// in-memory chunkserver. The client's test dial function maps it to bufconn.
+// The coordinator's own connections (used only for chunk cleanup in
+// DeleteFile) dial it for real; port 1 refuses immediately, so cleanup fails
+// fast and is just logged. Chunk cleanup is tested in the coordinator package.
+const testChunkserverAddr = "127.0.0.1:1"
+
+// cluster is an in-memory coordinator plus one chunkserver.
+type cluster struct {
+	coordLis *bufconn.Listener
+	csLis    *bufconn.Listener
+	store    *chunkserver.Store // the chunkserver's disk, for tampering in tests
+}
+
+func serve(t *testing.T, register func(*grpc.Server)) *bufconn.Listener {
 	t.Helper()
-
-	store, err := chunkserver.NewStore(filepath.Join(t.TempDir(), "data"))
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	gfspb.RegisterChunkServerServiceServer(srv, chunkserver.NewServer("test-node", store))
+	register(srv)
 	go srv.Serve(lis)
+	t.Cleanup(srv.Stop)
+	return lis
+}
 
-	conn, err := grpc.NewClient("passthrough:///bufnet",
+func dialBufconn(lis *bufconn.Listener) (*grpc.ClientConn, error) {
+	return grpc.NewClient("passthrough:///bufnet",
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return lis.DialContext(ctx)
 		}),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
-	if err != nil {
-		t.Fatalf("grpc.NewClient: %v", err)
-	}
+}
 
-	c := newWithConn(conn)
-	t.Cleanup(func() {
-		c.Close()
-		srv.Stop()
+// startCluster runs a coordinator and a chunkserver that reports to it.
+func startCluster(t *testing.T) *cluster {
+	t.Helper()
+
+	coordLis := serve(t, func(s *grpc.Server) {
+		gfspb.RegisterCoordinatorServiceServer(s,
+			coordinator.NewServer(coordinator.NewMetadata(), []string{testChunkserverAddr}))
 	})
-	return c, store
+
+	store, err := chunkserver.NewStore(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	csToCoord, err := dialBufconn(coordLis)
+	if err != nil {
+		t.Fatalf("dial coordinator: %v", err)
+	}
+	t.Cleanup(func() { csToCoord.Close() })
+	cs := chunkserver.NewServer("cs1", store)
+	cs.SetCoordinator(gfspb.NewCoordinatorServiceClient(csToCoord))
+	csLis := serve(t, func(s *grpc.Server) { gfspb.RegisterChunkServerServiceServer(s, cs) })
+
+	return &cluster{coordLis: coordLis, csLis: csLis, store: store}
+}
+
+// newClient returns a Client connected to the cluster. dial lets a test
+// override how chunkserver addresses are reached (nil = the in-memory one).
+func (cl *cluster) newClient(t *testing.T, dial func(addr string) (*grpc.ClientConn, error)) *Client {
+	t.Helper()
+	coordConn, err := dialBufconn(cl.coordLis)
+	if err != nil {
+		t.Fatalf("dial coordinator: %v", err)
+	}
+	if dial == nil {
+		dial = func(addr string) (*grpc.ClientConn, error) {
+			if addr != testChunkserverAddr {
+				return nil, errors.New("unknown chunkserver " + addr)
+			}
+			return dialBufconn(cl.csLis)
+		}
+	}
+	c := newWithConn(coordConn, dial)
+	t.Cleanup(func() { c.Close() })
+	return c
 }
 
 // randomBytes returns n pseudo-random bytes, the same for the same n. Random
@@ -58,15 +107,12 @@ func startChunkserver(t *testing.T) (*Client, *chunkserver.Store) {
 // the output and is caught by the byte comparison.
 func randomBytes(n int) []byte {
 	var seed [32]byte
-	seed[0] = byte(n)
-	seed[1] = byte(n >> 8)
-	seed[2] = byte(n >> 16)
+	seed[0], seed[1], seed[2] = byte(n), byte(n>>8), byte(n>>16)
 	b := make([]byte, n)
 	rand.NewChaCha8(seed).Read(b)
 	return b
 }
 
-// writeTempFile creates a file with the given contents and returns its path.
 func writeTempFile(t *testing.T, name string, data []byte) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), name)
@@ -80,6 +126,19 @@ func testContext(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+func listPaths(t *testing.T, c *Client, prefix string) []string {
+	t.Helper()
+	files, err := c.List(testContext(t), prefix)
+	if err != nil {
+		t.Fatalf("List(%q): %v", prefix, err)
+	}
+	var paths []string
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
+	return paths
 }
 
 func TestUploadDownloadRoundTrip(t *testing.T) {
@@ -97,27 +156,27 @@ func TestUploadDownloadRoundTrip(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c, _ := startChunkserver(t)
+			c := startCluster(t).newClient(t, nil)
 			ctx := testContext(t)
 			data := randomBytes(tc.size)
 			in := writeTempFile(t, "input.bin", data)
 
-			m, err := c.Upload(ctx, in)
+			info, err := c.Upload(ctx, in, "input.bin")
 			if err != nil {
 				t.Fatalf("Upload: %v", err)
 			}
-			if m.Name != "input.bin" || m.Size != int64(tc.size) || len(m.Chunks) != tc.wantChunks {
-				t.Fatalf("manifest = {name %q, size %d, %d chunks}, want {%q, %d, %d chunks}",
-					m.Name, m.Size, len(m.Chunks), "input.bin", tc.size, tc.wantChunks)
+			if info.Path != "input.bin" || info.Size != int64(tc.size) || len(info.Chunks) != tc.wantChunks {
+				t.Fatalf("FileInfo = {path %q, size %d, %d chunks}, want {%q, %d, %d chunks}",
+					info.Path, info.Size, len(info.Chunks), "input.bin", tc.size, tc.wantChunks)
 			}
-			for i, ref := range m.Chunks {
-				if ref.Index != i {
-					t.Errorf("chunk %d has Index %d, want %d", i, ref.Index, i)
+			for i, ref := range info.Chunks {
+				if ref.Index != i || len(ref.Addrs) == 0 {
+					t.Errorf("chunk %d = {Index %d, Addrs %v}, want index %d and an address", i, ref.Index, ref.Addrs, i)
 				}
 			}
 
 			out := filepath.Join(t.TempDir(), "output.bin")
-			if err := c.Download(ctx, m, out); err != nil {
+			if err := c.Download(ctx, "input.bin", out); err != nil {
 				t.Fatalf("Download: %v", err)
 			}
 			got, err := os.ReadFile(out)
@@ -132,65 +191,107 @@ func TestUploadDownloadRoundTrip(t *testing.T) {
 }
 
 func TestDownloadDetectsCorruptedChunk(t *testing.T) {
-	c, store := startChunkserver(t)
+	cl := startCluster(t)
+	c := cl.newClient(t, nil)
 	ctx := testContext(t)
-	data := randomBytes(ChunkSize + 1) // two chunks
-	in := writeTempFile(t, "input.bin", data)
+	in := writeTempFile(t, "input.bin", randomBytes(ChunkSize+1)) // two chunks
 
-	m, err := c.Upload(ctx, in)
+	info, err := c.Upload(ctx, in, "input.bin")
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
-	if len(m.Chunks) == 0 {
+	if len(info.Chunks) == 0 {
 		t.Fatal("Upload returned no chunks")
 	}
 
-	// Simulate disk corruption: same length, one bit flipped. The server will
-	// happily serve these bytes with a header checksum computed from them, so
-	// only the client's check against the manifest can catch it.
-	id := m.Chunks[0].ID
-	stored, err := store.Read(id)
+	// Simulate disk corruption: same length, one bit flipped. The chunkserver
+	// serves these bytes with a header checksum computed from them, so only
+	// the client's check against the coordinator's checksum can catch it.
+	id := info.Chunks[0].ID
+	stored, err := cl.store.Read(id)
 	if err != nil {
 		t.Fatalf("store.Read(%q): %v", id, err)
 	}
 	stored[0] ^= 0x01
-	if err := store.Write(id, stored); err != nil {
+	if err := cl.store.Write(id, stored); err != nil {
 		t.Fatalf("store.Write(%q): %v", id, err)
 	}
 
 	out := filepath.Join(t.TempDir(), "output.bin")
-	err = c.Download(ctx, m, out)
-	if err == nil {
-		t.Fatal("Download of a corrupted chunk succeeded, want an error")
+	err = c.Download(ctx, "input.bin", out)
+	if !errors.Is(err, ErrChunkCorrupted) {
+		t.Fatalf("Download of a corrupted chunk: error = %v, want ErrChunkCorrupted", err)
 	}
-	if errors.Is(err, errNotImplemented) {
-		t.Fatalf("Download returned %v; implement it first", err)
+	if _, statErr := os.Stat(out); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("failed Download left a file at %s (stat error = %v), want none", out, statErr)
 	}
 }
 
-func TestManifestSaveLoad(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "manifests")
-	want := &Manifest{
-		Name: "report.pdf",
-		Size: 5,
-		Chunks: []ChunkRef{
-			{ID: "abc123", Index: 0, Length: 5, Checksum: []byte{0xde, 0xad, 0xbe, 0xef}},
-		},
+func TestFailedUploadIsNotListed(t *testing.T) {
+	cl := startCluster(t)
+	ctx := testContext(t)
+	in := writeTempFile(t, "input.bin", randomBytes(1000))
+
+	// A client that cannot reach any chunkserver: CreateFile succeeds, every
+	// chunk write fails, so the file must stay pending (invisible).
+	broken := cl.newClient(t, func(addr string) (*grpc.ClientConn, error) {
+		return nil, errors.New("chunkserver unreachable")
+	})
+	if _, err := broken.Upload(ctx, in, "failed.bin"); err == nil {
+		t.Fatal("Upload with unreachable chunkservers succeeded, want an error")
+	} else if errors.Is(err, errNotImplemented) {
+		t.Fatalf("Upload returned %v; implement it first", err)
 	}
 
-	if err := SaveManifest(dir, want); err != nil {
-		t.Fatalf("SaveManifest: %v", err)
+	c := cl.newClient(t, nil)
+	if paths := listPaths(t, c, ""); slices.Contains(paths, "failed.bin") {
+		t.Errorf("List = %v, want the failed upload excluded", paths)
 	}
-	got, err := LoadManifest(dir, "report.pdf")
-	if err != nil {
-		t.Fatalf("LoadManifest: %v", err)
+	err := c.Download(ctx, "failed.bin", filepath.Join(t.TempDir(), "out.bin"))
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("Download(failed upload): error = %v, want gRPC NotFound", err)
 	}
-	if got.Name != want.Name || got.Size != want.Size || len(got.Chunks) != 1 ||
-		got.Chunks[0].ID != "abc123" || !bytes.Equal(got.Chunks[0].Checksum, want.Chunks[0].Checksum) {
-		t.Fatalf("loaded %+v, want %+v", got, want)
+}
+
+func TestListAfterUpload(t *testing.T) {
+	c := startCluster(t).newClient(t, nil)
+	ctx := testContext(t)
+
+	for _, name := range []string{"docs-b.txt", "docs-a.txt", "img.png"} {
+		in := writeTempFile(t, name, randomBytes(100+len(name)))
+		if _, err := c.Upload(ctx, in, name); err != nil {
+			t.Fatalf("Upload(%s): %v", name, err)
+		}
 	}
 
-	if _, err := LoadManifest(dir, "missing.txt"); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("LoadManifest(missing) error = %v, want os.ErrNotExist", err)
+	if got, want := listPaths(t, c, ""), []string{"docs-a.txt", "docs-b.txt", "img.png"}; !slices.Equal(got, want) {
+		t.Errorf("List(\"\") = %v, want %v", got, want)
+	}
+	if got, want := listPaths(t, c, "docs-"), []string{"docs-a.txt", "docs-b.txt"}; !slices.Equal(got, want) {
+		t.Errorf("List(\"docs-\") = %v, want %v", got, want)
+	}
+}
+
+func TestDeleteThenDownloadIsNotFound(t *testing.T) {
+	c := startCluster(t).newClient(t, nil)
+	ctx := testContext(t)
+	in := writeTempFile(t, "input.bin", randomBytes(5000))
+
+	if _, err := c.Upload(ctx, in, "input.bin"); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if err := c.Delete(ctx, "input.bin"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	err := c.Download(ctx, "input.bin", filepath.Join(t.TempDir(), "out.bin"))
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("Download after Delete: error = %v, want gRPC NotFound", err)
+	}
+	if paths := listPaths(t, c, ""); len(paths) != 0 {
+		t.Errorf("List after Delete = %v, want empty", paths)
+	}
+	if err := c.Delete(ctx, "input.bin"); status.Code(err) != codes.NotFound {
+		t.Errorf("second Delete: error = %v, want gRPC NotFound", err)
 	}
 }

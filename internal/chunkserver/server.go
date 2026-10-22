@@ -102,6 +102,23 @@ func (s *Server) WriteChunk(stream grpc.ClientStreamingServer[gfspb.WriteChunkRe
 		return toStatus(err)
 	}
 
+	// Tell the coordinator we have this chunk
+	if s.coord != nil {
+		ctx, cancel := context.WithTimeout(stream.Context(), reportTimeout)
+		defer cancel()
+		_, err := s.coord.ReportChunk(ctx, &gfspb.ReportChunkRequest{
+			NodeId: s.nodeID,
+			Chunk: &gfspb.ChunkInfo{
+				ChunkId:  info.GetChunkId(),
+				Length:   int64(len(buf)),
+				Checksum: sum[:],
+			},
+		})
+		if err != nil {
+			return status.Errorf(status.Code(err), "stored chunk but could not report it to coordinator: %v", err)
+		}
+	}
+
 	return stream.SendAndClose(&gfspb.WriteChunkResponse{
 		ChunkId:      info.GetChunkId(),
 		BytesWritten: int64(len(buf)),
