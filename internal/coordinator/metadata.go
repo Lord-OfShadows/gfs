@@ -23,9 +23,6 @@ var (
 	ErrNoChunkservers   = errors.New("no chunkservers available")
 )
 
-// errNotImplemented is returned by the stubs below until they are written.
-var errNotImplemented = errors.New("not implemented")
-
 // ChunkSpec is what the client tells us about a chunk before uploading it.
 type ChunkSpec struct {
 	Length   int64
@@ -137,7 +134,7 @@ func (m *Metadata) CreateFile(opID, path string, specs []ChunkSpec, nodes []stri
 	// Is the path taken?
 	if old, exists := m.files[path]; exists {
 		if old.Visible {
-			return nil, fmt.Errorf("%w : %s", ErrFileExists, path)
+			return nil, fmt.Errorf("%w: %s", ErrFileExists, path)
 		}
 		for _, c := range old.Chunks {
 			delete(m.chunks, c.ID)
@@ -181,7 +178,7 @@ func (m *Metadata) GetFile(path string) (*File, error) {
 
 	f, ok := m.files[path]
 	if !ok || !f.Visible {
-		return nil, fmt.Errorf("%w : %s", ErrFileNotFound, path)
+		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, path)
 	}
 	return f.clone(), nil
 }
@@ -212,8 +209,8 @@ func (m *Metadata) ListFiles(prefix string) []FileSummary {
 }
 
 // DeleteFile removes the file at path and its chunks from the metadata and
-// returns copies of those chunks, so the caller can tell chunkservers to
-// delete the bytes (after releasing the lock).
+// returns those chunks (no longer reachable from the maps), so the caller can
+// tell chunkservers to delete the bytes after releasing the lock.
 func (m *Metadata) DeleteFile(path string) ([]*Chunk, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -244,7 +241,7 @@ func (m *Metadata) ReportChunk(nodeID, chunkID string, checksum []byte) error {
 	// Do we know this chunk?
 	c, ok := m.chunks[chunkID]
 	if !ok {
-		return fmt.Errorf("%w : %s", ErrChunkNotFound, chunkID)
+		return fmt.Errorf("%w: %s", ErrChunkNotFound, chunkID)
 	}
 
 	// Does the node have RIGHT bytes?
