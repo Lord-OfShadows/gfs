@@ -1,0 +1,63 @@
+# One coordinator + four chunkservers, plus an on-demand CLI client.
+#
+#   docker compose up -d --build             start the cluster
+#   docker compose run --rm gfs ls           run a client command
+#   docker compose down -v                   stop and delete all data
+
+# Every service runs the same image (gfs:local). Only one service builds it:
+# if several services built the same tag, Compose would build them in
+# parallel and they would collide. The others reuse the local image.
+x-chunkserver: &chunkserver
+  image: gfs:local
+  pull_policy: never # never look for gfs:local on Docker Hub; it is built locally
+  restart: unless-stopped
+  depends_on: [coordinator]
+  networks: [gfs]
+
+services:
+  coordinator:
+    build: .
+    image: gfs:local
+    command: ["/coordinator", "--addr", ":7000", "--chunkservers", "cs1:7001,cs2:7001,cs3:7001,cs4:7001"]
+    restart: unless-stopped
+    networks: [gfs]
+
+  cs1:
+    <<: *chunkserver
+    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs1", "--data-dir", "/data", "--coordinator", "coordinator:7000"]
+    volumes: ["cs1-data:/data"]
+
+  cs2:
+    <<: *chunkserver
+    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs2", "--data-dir", "/data", "--coordinator", "coordinator:7000"]
+    volumes: ["cs2-data:/data"]
+
+  cs3:
+    <<: *chunkserver
+    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs3", "--data-dir", "/data", "--coordinator", "coordinator:7000"]
+    volumes: ["cs3-data:/data"]
+
+  cs4:
+    <<: *chunkserver
+    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs4", "--data-dir", "/data", "--coordinator", "coordinator:7000"]
+    volumes: ["cs4-data:/data"]
+
+  # CLI client. Not started by `up` (profile "tools"); use `docker compose run --rm gfs ...`.
+  # The CLI expects flags after the subcommand, so a tiny shell wrapper appends
+  # the default --coordinator flag to whatever arguments you pass.
+  gfs:
+    build: . # separate profile, so it is never built at the same time as coordinator
+    image: gfs:local
+    profiles: ["tools"]
+    entrypoint: ["/bin/sh", "-c", 'exec /gfs "$@" --coordinator coordinator:7000', "gfs"]
+    volumes: ["./transfer:/transfer"]
+    networks: [gfs]
+
+networks:
+  gfs:
+
+volumes:
+  cs1-data:
+  cs2-data:
+  cs3-data:
+  cs4-data:
