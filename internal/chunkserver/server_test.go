@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"path/filepath"
@@ -295,5 +296,121 @@ func TestReadChunk(t *testing.T) {
 				t.Errorf("ReadChunk(%q) sent %d messages before failing, want 0", tc.id, len(msgs))
 			}
 		})
+	}
+}
+
+// peerNode is one chunkserver in a multi-server test.
+type peerNode struct {
+	addr  string
+	store *Store
+	srv   *grpc.Server
+	lis   *bufconn.Listener
+}
+
+// startPeers runs n chunkservers over bufconn. Each one's dial function maps
+// the other servers' addresses ("cs1:7001", ...) to their in-memory listeners,
+// so they can forward chunks to each other.
+func startPeers(t *testing.T, n int) []*peerNode {
+	t.Helper()
+
+	nodes := make([]*peerNode, n)
+	listeners := map[string]*bufconn.Listener{}
+	for i := range nodes {
+		addr := fmt.Sprintf("cs%d:7001", i+1)
+		nodes[i] = &peerNode{addr: addr, lis: bufconn.Listen(1 << 20)}
+		listeners[addr] = nodes[i].lis
+	}
+	dial := func(addr string) (*grpc.ClientConn, error) {
+		lis, ok := listeners[addr]
+		if !ok {
+			return nil, fmt.Errorf("unknown test peer %s", addr)
+		}
+		return grpc.NewClient("passthrough:///"+addr,
+			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+				return lis.DialContext(ctx)
+			}),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+	}
+
+	for i, node := range nodes {
+		store, err := NewStore(filepath.Join(t.TempDir(), fmt.Sprintf("data%d", i+1)))
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		s := NewServer(fmt.Sprintf("cs%d", i+1), store)
+		s.SetDial(dial) // before serving
+		srv := grpc.NewServer()
+		gfspb.RegisterChunkServerServiceServer(srv, s)
+		go srv.Serve(node.lis)
+		node.store, node.srv = store, srv
+		t.Cleanup(func() {
+			srv.Stop()
+			s.Close()
+		})
+	}
+	return nodes
+}
+
+// clientFor returns a client connected to one test node.
+func clientFor(t *testing.T, node *peerNode) gfspb.ChunkServerServiceClient {
+	t.Helper()
+	conn, err := grpc.NewClient("passthrough:///"+node.addr,
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return node.lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return gfspb.NewChunkServerServiceClient(conn)
+}
+
+// forwardingWrite builds a WriteChunk stream for data that asks the receiving
+// server to forward it to the given addresses.
+func forwardingWrite(id string, data []byte, forwardTo ...string) []*gfspb.WriteChunkRequest {
+	header := &gfspb.WriteChunkHeader{
+		OperationId: "op-" + id,
+		Chunk:       &gfspb.ChunkInfo{ChunkId: id, Length: int64(len(data)), Checksum: sha(data)},
+	}
+	for _, addr := range forwardTo {
+		header.ForwardTo = append(header.ForwardTo, &gfspb.ReplicaLocation{Address: addr})
+	}
+	msgs := []*gfspb.WriteChunkRequest{{Payload: &gfspb.WriteChunkRequest_Header{Header: header}}}
+	return append(msgs, dataMsgs(data, 64<<10)...)
+}
+
+func TestWriteChunkForwardsToReplicas(t *testing.T) {
+	nodes := startPeers(t, 3)
+	data := pattern(200 << 10) // several frames
+	const id = "chunk-fwd"
+
+	_, err := sendWrite(t, clientFor(t, nodes[0]), forwardingWrite(id, data, nodes[1].addr, nodes[2].addr))
+	if err != nil {
+		t.Fatalf("WriteChunk to %s forwarding to [%s %s]: %v", nodes[0].addr, nodes[1].addr, nodes[2].addr, err)
+	}
+
+	for _, node := range nodes {
+		got, err := node.store.Read(id)
+		if err != nil {
+			t.Errorf("%s: chunk not stored: %v", node.addr, err)
+			continue
+		}
+		if !bytes.Equal(got, data) {
+			t.Errorf("%s: stored %d bytes, want the %d bytes that were sent", node.addr, len(got), len(data))
+		}
+	}
+}
+
+func TestWriteChunkFailsWhenReplicaDown(t *testing.T) {
+	nodes := startPeers(t, 3)
+	nodes[2].srv.Stop() // the last replica in the chain is unreachable
+
+	data := pattern(100 << 10)
+	_, err := sendWrite(t, clientFor(t, nodes[0]), forwardingWrite("chunk-down", data, nodes[1].addr, nodes[2].addr))
+	if err == nil {
+		t.Fatalf("WriteChunk succeeded although replica %s is down, want an error", nodes[2].addr)
 	}
 }

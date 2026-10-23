@@ -146,7 +146,14 @@ func (c *Client) uploadChunk(ctx context.Context, cs gfspb.ChunkServerServiceCli
 		return fmt.Errorf("Open Write Stream: %w", err)
 	}
 
-	// Send The header
+	// Everyone after the first server: the primary forwards to them
+	var forward []*gfspb.ReplicaLocation
+	if len(ref.Addrs) > 1 {
+		for _, addr := range ref.Addrs[1:] {
+			forward = append(forward, &gfspb.ReplicaLocation{Address: addr})
+		}
+	}
+
 	header := &gfspb.WriteChunkRequest{
 		Payload: &gfspb.WriteChunkRequest_Header{
 			Header: &gfspb.WriteChunkHeader{
@@ -156,6 +163,7 @@ func (c *Client) uploadChunk(ctx context.Context, cs gfspb.ChunkServerServiceCli
 					Length:   ref.Length,
 					Checksum: ref.Checksum,
 				},
+				ForwardTo: forward,
 			},
 		},
 	}

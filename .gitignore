@@ -24,3 +24,7 @@ Thumbs.db
 
 # local test downloads
 /out*
+
+# files moved in/out of the Docker client container
+/transfer/*
+!/transfer/.gitkeep

@@ -42,6 +42,7 @@ func run(addr, dataDir, nodeID, coordAddr string) error {
 	}
 
 	srv := chunkserver.NewServer(nodeID, store)
+	defer srv.Close() // runs after Serve returns: closes cached peer connections
 	if coordAddr != "" {
 		// Lazy: no network traffic until the first ReportChunk, so the
 		// coordinator does not have to be running yet.

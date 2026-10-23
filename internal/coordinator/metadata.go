@@ -23,6 +23,9 @@ var (
 	ErrNoChunkservers   = errors.New("no chunkservers available")
 )
 
+// How many copies of each chunk we try to keep
+const ReplicationFactor = 3
+
 // ChunkSpec is what the client tells us about a chunk before uploading it.
 type ChunkSpec struct {
 	Length   int64
@@ -106,6 +109,20 @@ func (f *File) clone() *File {
 	return &out
 }
 
+// pickNodes return upto N different nodes for chunk i. The starting node
+// rotates with i, so chunks (and which server is primary) spread evenly.
+func pickNodes(nodes []string, i, n int) []string {
+	if n > len(nodes) {
+		n = len(nodes) // fewer servers than copies wanted; we use all of them
+	}
+
+	out := make([]string, 0, n)
+	for j := 0; j < n; j++ {
+		out = append(out, nodes[(i+j)%len(nodes)])
+	}
+	return out
+}
+
 // CreateFile registers a pending (not yet Visible) file at path with one chunk
 // per spec, assigns each chunk a new ID and the chunkservers to write to, and
 // returns a copy of the file. A file with no chunks is Visible immediately.
@@ -153,8 +170,8 @@ func (m *Metadata) CreateFile(opID, path string, specs []ChunkSpec, nodes []stri
 			FileID:   f.ID,
 			Index:    i,
 			Length:   spec.Length,
-			Checksum: bytes.Clone(spec.Checksum),    // own copy: the caller may reuse its slice
-			Assigned: []string{nodes[i%len(nodes)]}, // spread chunks across nodes (Round Robin)
+			Checksum: bytes.Clone(spec.Checksum),             // own copy: the caller may reuse its slice
+			Assigned: pickNodes(nodes, i, ReplicationFactor), // spread chunks across nodes (Round Robin)
 			Replicas: map[string]bool{},
 		}
 		f.Chunks = append(f.Chunks, c)
@@ -262,8 +279,8 @@ func (m *Metadata) ReportChunk(nodeID, chunkID string, checksum []byte) error {
 		}
 
 		for _, fc := range f.Chunks {
-			if len(fc.Replicas) == 0 {
-				return nil // atleast one chunk is still missing; Keep Waiting
+			if len(fc.Replicas) < len(fc.Assigned) {
+				return nil // some copies of this chunk are still missing; Keep Waiting
 			}
 		}
 		f.Visible = true // all chunks stored; the upload is complete
