@@ -6,9 +6,7 @@ GFS: Distributed File System Replica
 
 **Target stack: Go · gRPC · Protocol Buffers · Docker**
 
-This PRD is derived from the project description on the resume. It
-defines a buildable specification, not a claim that the listed features
-or performance targets have already been implemented or verified.
+This document defines the design, scope, and milestones for the system.
 
 # 1. Executive summary
 
