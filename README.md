@@ -2,7 +2,7 @@
 
 A small GFS-inspired distributed file system in Go: one coordinator holds file metadata, several chunkservers store replicated chunks, and a CLI client talks to both over gRPC.
 
-**Status:** early development. Only the project scaffold and gRPC contracts (milestone M0) exist so far. See [docs/PRD.md](docs/PRD.md) for the full specification.
+**Status:** Core system working: chunked upload/download with SHA-256 integrity checks, atomic chunk writes, 3-way replication via a write pipeline, replica-fallback reads, idempotent file creation, and a Docker Compose cluster (1 coordinator + 4 chunkservers). Next (M4, not started): heartbeats, failure detection, and automatic re-replication. See [docs/PRD.md](docs/PRD.md) for the full design.
 
 ## Layout
 
