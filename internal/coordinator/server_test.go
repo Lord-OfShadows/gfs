@@ -250,3 +250,76 @@ func TestServerDeleteFile(t *testing.T) {
 	_, err = c.DeleteFile(ctx, &gfspb.DeleteFileRequest{Path: "/a.txt"})
 	wantCode(t, "second DeleteFile", err, codes.NotFound)
 }
+
+// serverWithDeadNode returns a Server whose three static nodes all sent
+// heartbeats, with cs3 then going silent past UnavailableAfter.
+func serverWithDeadNode() *Server {
+	s := NewServer(NewMetadata(), []string{"cs1:7001", "cs2:7001", "cs3:7001"})
+	r := s.Registry()
+	r.Heartbeat("cs1", "cs1:7001", t0)
+	r.Heartbeat("cs2", "cs2:7001", t0)
+	r.Heartbeat("cs3", "cs3:7001", t0)
+
+	later := t0.Add(UnavailableAfter + 500*time.Millisecond)
+	r.Heartbeat("cs1", "cs1:7001", later)
+	r.Heartbeat("cs2", "cs2:7001", later)
+	r.Sweep(later)
+	return s
+}
+
+func TestCreateFileNeverAssignsDeadNode(t *testing.T) {
+	s := serverWithDeadNode()
+
+	resp, err := s.CreateFile(rpcContext(t), createReq("op-1", "/a.txt", "one", "two", "three", "four"))
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	for i, p := range resp.GetChunks() {
+		var got []string
+		for _, r := range p.GetReplicas() {
+			got = append(got, r.GetAddress())
+		}
+		slices.Sort(got)
+		if want := []string{"cs1:7001", "cs2:7001"}; !slices.Equal(got, want) {
+			t.Errorf("chunk %d replicas = %v, want %v", i, got, want)
+		}
+	}
+}
+
+func TestCreateFileAllNodesDead(t *testing.T) {
+	s := NewServer(NewMetadata(), []string{"cs1:7001"})
+	s.Registry().Heartbeat("cs1", "cs1:7001", t0)
+	s.Registry().Sweep(t0.Add(UnavailableAfter + 500*time.Millisecond))
+
+	_, err := s.CreateFile(rpcContext(t), createReq("op-1", "/a.txt", "one"))
+	wantCode(t, "CreateFile with every node dead", err, codes.Unavailable)
+}
+
+func TestPlacementFallsBackToStaticListBeforeFirstHeartbeat(t *testing.T) {
+	static := []string{"cs1:7001", "cs2:7001"}
+	s := NewServer(NewMetadata(), static)
+	if got := s.placementNodes(); !slices.Equal(got, static) {
+		t.Fatalf("placementNodes = %v, want %v", got, static)
+	}
+}
+
+func TestHeartbeatHandler(t *testing.T) {
+	s := NewServer(NewMetadata(), nil)
+	ctx := rpcContext(t)
+
+	for _, req := range []*gfspb.HeartbeatRequest{
+		{Address: "cs1:7001"},
+		{NodeId: "cs1"},
+	} {
+		_, err := s.Heartbeat(ctx, req)
+		wantCode(t, "Heartbeat with a missing field", err, codes.InvalidArgument)
+	}
+
+	resp, err := s.Heartbeat(ctx, &gfspb.HeartbeatRequest{NodeId: "cs1", Address: "cs1:7001"})
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if resp.GetState() != gfspb.NodeState_NODE_STATE_HEALTHY || resp.GetHeartbeatIntervalMs() != 1000 {
+		t.Errorf("Heartbeat = {state %v, interval %d}, want {HEALTHY, 1000}", resp.GetState(), resp.GetHeartbeatIntervalMs())
+	}
+}

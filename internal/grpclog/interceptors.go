@@ -11,6 +11,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/Lord-OfShadows/gfs/proto/gfspb"
 )
 
 // UnaryServerInterceptor logs every unary (request/response) RPC.
@@ -29,7 +31,9 @@ func StreamServerInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamSer
 	return err
 }
 
-// logRPC writes one line: INFO for success, WARN for any error.
+// logRPC writes one line: INFO for success, WARN for any error. Successful
+// heartbeats are DEBUG, because they fire every second per node and would
+// flood the logs.
 func logRPC(ctx context.Context, method string, start time.Time, err error) {
 	code := status.Code(err) // OK for nil; Unknown for errors that are not gRPC statuses
 	attrs := []slog.Attr{
@@ -38,6 +42,9 @@ func logRPC(ctx context.Context, method string, start time.Time, err error) {
 		slog.String("code", code.String()),
 	}
 	level := slog.LevelInfo
+	if method == gfspb.CoordinatorService_Heartbeat_FullMethodName {
+		level = slog.LevelDebug
+	}
 	if code != codes.OK {
 		level = slog.LevelWarn
 		attrs = append(attrs, slog.String("error", status.Convert(err).Message()))

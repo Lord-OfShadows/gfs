@@ -24,18 +24,27 @@ func main() {
 	dataDir := flag.String("data-dir", "./data/cs1", "directory where chunk files are stored")
 	nodeID := flag.String("node-id", "cs1", "unique ID of this chunkserver")
 	coordAddr := flag.String("coordinator", "localhost:7000", "coordinator address to report chunks to (empty disables reporting)")
+	advertise := flag.String("advertise", "", `address other nodes and clients use to reach this server (default "localhost" + the port from --addr)`)
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("node_id", *nodeID)
 	slog.SetDefault(logger)
 
-	if err := run(*addr, *dataDir, *nodeID, *coordAddr); err != nil {
+	if err := run(*addr, *dataDir, *nodeID, *coordAddr, *advertise); err != nil {
 		slog.Error("chunkserver exited", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(addr, dataDir, nodeID, coordAddr string) error {
+func run(addr, dataDir, nodeID, coordAddr, advertise string) error {
+	if advertise == "" {
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return fmt.Errorf("parse --addr %q: %w", addr, err)
+		}
+		advertise = net.JoinHostPort("localhost", port)
+	}
+
 	store, err := chunkserver.NewStore(dataDir)
 	if err != nil {
 		return err
@@ -76,6 +85,10 @@ func run(addr, dataDir, nodeID, coordAddr string) error {
 		grpcServer.GracefulStop()
 	}()
 
-	slog.Info("chunkserver started", "addr", lis.Addr().String(), "data_dir", dataDir, "coordinator", coordAddr)
+	if coordAddr != "" {
+		go srv.RunHeartbeats(ctx, advertise, chunkserver.HeartbeatEvery)
+	}
+
+	slog.Info("chunkserver started", "addr", lis.Addr().String(), "advertise", advertise, "data_dir", dataDir, "coordinator", coordAddr)
 	return grpcServer.Serve(lis)
 }
