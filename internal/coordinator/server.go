@@ -30,7 +30,8 @@ type Server struct {
 	gfspb.UnimplementedCoordinatorServiceServer
 
 	md           *Metadata
-	chunkservers []string // addresses new chunks may be placed on
+	chunkservers []string // static --chunkservers list; used until the first heartbeat
+	registry     *Registry
 
 	// dial opens a connection to a chunkserver. Tests replace it to use an
 	// in-memory (bufconn) connection.
@@ -43,10 +44,25 @@ func NewServer(md *Metadata, chunkservers []string) *Server {
 	return &Server{
 		md:           md,
 		chunkservers: chunkservers,
+		registry:     NewRegistry(),
 		dial: func(addr string) (*grpc.ClientConn, error) {
 			return grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		},
 	}
+}
+
+// Registry returns the node registry, so main can run its sweeper.
+func (s *Server) Registry() *Registry {
+	return s.registry
+}
+
+// placementNodes returns the addresses new chunks may be placed on: the static
+// list until any chunkserver has sent a heartbeat, the Healthy nodes after that.
+func (s *Server) placementNodes() []string {
+	if s.registry.Len() == 0 {
+		return s.chunkservers
+	}
+	return s.registry.Healthy()
 }
 
 // CreateFile validates the request, registers a pending file, and returns
@@ -72,7 +88,7 @@ func (s *Server) CreateFile(ctx context.Context, req *gfspb.CreateFileRequest) (
 		return nil, status.Errorf(codes.InvalidArgument, "size_bytes is %d but chunk lengths add up to %d", req.GetSizeBytes(), total)
 	}
 
-	f, err := s.md.CreateFile(req.GetOperationId(), req.GetPath(), specs, s.chunkservers)
+	f, err := s.md.CreateFile(req.GetOperationId(), req.GetPath(), specs, s.placementNodes())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -177,15 +193,31 @@ func (s *Server) ReportChunk(ctx context.Context, req *gfspb.ReportChunkRequest)
 	return &gfspb.ReportChunkResponse{}, nil
 }
 
-// Heartbeat acknowledges a chunkserver.
-//
-// TODO(M4): record last-heartbeat time per node, run the
-// HEALTHY -> SUSPECT -> UNAVAILABLE state machine, and return the real state.
+// Heartbeat records that a chunkserver is alive and tells it how the
+// coordinator currently sees it.
 func (s *Server) Heartbeat(ctx context.Context, req *gfspb.HeartbeatRequest) (*gfspb.HeartbeatResponse, error) {
+	if req.GetNodeId() == "" || req.GetAddress() == "" {
+		return nil, status.Error(codes.InvalidArgument, "node_id and address are required")
+	}
+	state := s.registry.Heartbeat(req.GetNodeId(), req.GetAddress(), time.Now())
 	return &gfspb.HeartbeatResponse{
-		State:               gfspb.NodeState_NODE_STATE_HEALTHY,
+		State:               toProtoState(state),
 		HeartbeatIntervalMs: heartbeatIntervalMs,
 	}, nil
+}
+
+// toProtoState converts a NodeState to its protobuf form.
+func toProtoState(s NodeState) gfspb.NodeState {
+	switch s {
+	case NodeHealthy:
+		return gfspb.NodeState_NODE_STATE_HEALTHY
+	case NodeSuspect:
+		return gfspb.NodeState_NODE_STATE_SUSPECT
+	case NodeUnavailable:
+		return gfspb.NodeState_NODE_STATE_UNAVAILABLE
+	default:
+		return gfspb.NodeState_NODE_STATE_UNSPECIFIED
+	}
 }
 
 // toPlacement converts a Chunk to the protobuf form sent to clients.

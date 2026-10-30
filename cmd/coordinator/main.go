@@ -45,7 +45,8 @@ func run(addr string, chunkservers []string) error {
 		grpc.ChainUnaryInterceptor(grpclog.UnaryServerInterceptor),
 		grpc.ChainStreamInterceptor(grpclog.StreamServerInterceptor),
 	)
-	gfspb.RegisterCoordinatorServiceServer(grpcServer, coordinator.NewServer(coordinator.NewMetadata(), chunkservers))
+	srv := coordinator.NewServer(coordinator.NewMetadata(), chunkservers)
+	gfspb.RegisterCoordinatorServiceServer(grpcServer, srv)
 
 	// Stop cleanly on Ctrl+C (SIGINT) or SIGTERM (what `docker stop` sends).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -55,6 +56,8 @@ func run(addr string, chunkservers []string) error {
 		slog.Info("shutting down")
 		grpcServer.GracefulStop()
 	}()
+
+	go srv.Registry().RunSweeper(ctx, coordinator.SweepEvery)
 
 	slog.Info("coordinator started", "addr", lis.Addr().String(), "chunkservers", chunkservers)
 	return grpcServer.Serve(lis)

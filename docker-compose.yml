@@ -24,22 +24,22 @@ services:
 
   cs1:
     <<: *chunkserver
-    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs1", "--data-dir", "/data", "--coordinator", "coordinator:7000"]
+    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs1", "--data-dir", "/data", "--coordinator", "coordinator:7000", "--advertise", "cs1:7001"]
     volumes: ["cs1-data:/data"]
 
   cs2:
     <<: *chunkserver
-    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs2", "--data-dir", "/data", "--coordinator", "coordinator:7000"]
+    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs2", "--data-dir", "/data", "--coordinator", "coordinator:7000", "--advertise", "cs2:7001"]
     volumes: ["cs2-data:/data"]
 
   cs3:
     <<: *chunkserver
-    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs3", "--data-dir", "/data", "--coordinator", "coordinator:7000"]
+    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs3", "--data-dir", "/data", "--coordinator", "coordinator:7000", "--advertise", "cs3:7001"]
     volumes: ["cs3-data:/data"]
 
   cs4:
     <<: *chunkserver
-    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs4", "--data-dir", "/data", "--coordinator", "coordinator:7000"]
+    command: ["/chunkserver", "--addr", ":7001", "--node-id", "cs4", "--data-dir", "/data", "--coordinator", "coordinator:7000", "--advertise", "cs4:7001"]
     volumes: ["cs4-data:/data"]
 
   # CLI client. Not started by `up` (profile "tools"); use `docker compose run --rm gfs ...`.
