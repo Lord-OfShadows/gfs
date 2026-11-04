@@ -113,3 +113,35 @@ func TestRunSweeperSweepsUntilCancelled(t *testing.T) {
 		t.Fatal("RunSweeper did not stop after its context was cancelled")
 	}
 }
+
+func TestRegistryStateOf(t *testing.T) {
+	r := NewRegistry()
+	if _, ok := r.StateOf("cs1:7001"); ok {
+		t.Fatal("StateOf on an empty registry: ok = true, want false")
+	}
+
+	r.Heartbeat("cs1", "cs1:7001", t0)
+	r.Heartbeat("cs2", "cs2:7001", t0)
+	if st, ok := r.StateOf("cs1:7001"); !ok || st != NodeHealthy {
+		t.Fatalf("StateOf(cs1) = (%v, %v), want (%v, true)", st, ok, NodeHealthy)
+	}
+	if _, ok := r.StateOf("cs9:7001"); ok {
+		t.Fatal("StateOf(unknown address): ok = true, want false")
+	}
+
+	// cs2 keeps heartbeating; cs1 goes silent.
+	r.Heartbeat("cs2", "cs2:7001", t0.Add(2500*time.Millisecond))
+	r.Sweep(t0.Add(2500 * time.Millisecond))
+	if st, ok := r.StateOf("cs1:7001"); !ok || st != NodeSuspect {
+		t.Fatalf("StateOf(cs1) after +2.5s = (%v, %v), want (%v, true)", st, ok, NodeSuspect)
+	}
+
+	r.Heartbeat("cs2", "cs2:7001", t0.Add(3500*time.Millisecond))
+	r.Sweep(t0.Add(3500 * time.Millisecond))
+	if st, ok := r.StateOf("cs1:7001"); !ok || st != NodeUnavailable {
+		t.Fatalf("StateOf(cs1) after +3.5s = (%v, %v), want (%v, true)", st, ok, NodeUnavailable)
+	}
+	if st, ok := r.StateOf("cs2:7001"); !ok || st != NodeHealthy {
+		t.Fatalf("StateOf(cs2) = (%v, %v), want (%v, true)", st, ok, NodeHealthy)
+	}
+}

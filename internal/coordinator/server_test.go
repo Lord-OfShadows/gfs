@@ -323,3 +323,107 @@ func TestHeartbeatHandler(t *testing.T) {
 		t.Errorf("Heartbeat = {state %v, interval %d}, want {HEALTHY, 1000}", resp.GetState(), resp.GetHeartbeatIntervalMs())
 	}
 }
+
+// createVisibleOn creates a file directly on s and reports every chunk from
+// every assigned replica, so it becomes visible. It returns each chunk's
+// replica addresses in their original (placement) order.
+func createVisibleOn(t *testing.T, s *Server, req *gfspb.CreateFileRequest) [][]string {
+	t.Helper()
+	ctx := rpcContext(t)
+	resp, err := s.CreateFile(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateFile(%q): %v", req.GetPath(), err)
+	}
+	var orig [][]string
+	for _, p := range resp.GetChunks() {
+		var addrs []string
+		for i, r := range p.GetReplicas() {
+			addrs = append(addrs, r.GetAddress())
+			nodeID := "node-" + string(rune('a'+i)) // one distinct reporter per replica
+			if _, err := s.ReportChunk(ctx, &gfspb.ReportChunkRequest{NodeId: nodeID, Chunk: p.GetChunk()}); err != nil {
+				t.Fatalf("ReportChunk(%q): %v", p.GetChunk().GetChunkId(), err)
+			}
+		}
+		orig = append(orig, addrs)
+	}
+	return orig
+}
+
+// replicaView flattens replica locations to addresses and states.
+func replicaView(rs []*gfspb.ReplicaLocation) ([]string, []gfspb.NodeState) {
+	var addrs []string
+	var states []gfspb.NodeState
+	for _, r := range rs {
+		addrs = append(addrs, r.GetAddress())
+		states = append(states, r.GetState())
+	}
+	return addrs, states
+}
+
+func TestGetFileMetadataPutsUnavailableReplicaLast(t *testing.T) {
+	s := NewServer(NewMetadata(), []string{"cs1:7001", "cs2:7001", "cs3:7001"})
+	r := s.Registry()
+	for _, n := range []string{"cs1", "cs2", "cs3"} {
+		r.Heartbeat(n, n+":7001", t0)
+	}
+	orig := createVisibleOn(t, s, createReq("op-1", "/a.txt", "one", "two", "three"))
+
+	// Kill the replica tried first for chunk 0, so the ordering has to move it.
+	dead := orig[0][0]
+	later := t0.Add(UnavailableAfter + 500*time.Millisecond)
+	for _, n := range []string{"cs1", "cs2", "cs3"} {
+		if addr := n + ":7001"; addr != dead {
+			r.Heartbeat(n, addr, later)
+		}
+	}
+	r.Sweep(later)
+
+	resp, err := s.GetFileMetadata(rpcContext(t), &gfspb.GetFileMetadataRequest{Path: "/a.txt"})
+	if err != nil {
+		t.Fatalf("GetFileMetadata: %v", err)
+	}
+	chunks := resp.GetFile().GetChunks()
+	if len(chunks) != len(orig) {
+		t.Fatalf("got %d chunks, want %d", len(chunks), len(orig))
+	}
+	for i, p := range chunks {
+		var want []string // healthy replicas in their original order, then the dead one
+		for _, a := range orig[i] {
+			if a != dead {
+				want = append(want, a)
+			}
+		}
+		want = append(want, dead)
+		wantStates := []gfspb.NodeState{
+			gfspb.NodeState_NODE_STATE_HEALTHY,
+			gfspb.NodeState_NODE_STATE_HEALTHY,
+			gfspb.NodeState_NODE_STATE_UNAVAILABLE,
+		}
+
+		addrs, states := replicaView(p.GetReplicas())
+		if !slices.Equal(addrs, want) || !slices.Equal(states, wantStates) {
+			t.Errorf("chunk %d replicas = %v %v, want %v %v (original order %v)", i, addrs, states, want, wantStates, orig[i])
+		}
+	}
+}
+
+func TestGetFileMetadataOrderUnchangedWithoutHeartbeats(t *testing.T) {
+	s := NewServer(NewMetadata(), []string{"cs1:7001", "cs2:7001", "cs3:7001"})
+	orig := createVisibleOn(t, s, createReq("op-1", "/a.txt", "one", "two", "three"))
+
+	resp, err := s.GetFileMetadata(rpcContext(t), &gfspb.GetFileMetadataRequest{Path: "/a.txt"})
+	if err != nil {
+		t.Fatalf("GetFileMetadata: %v", err)
+	}
+	for i, p := range resp.GetFile().GetChunks() {
+		addrs, states := replicaView(p.GetReplicas())
+		if !slices.Equal(addrs, orig[i]) {
+			t.Errorf("chunk %d replicas = %v, want original order %v", i, addrs, orig[i])
+		}
+		for j, st := range states {
+			if st != gfspb.NodeState_NODE_STATE_UNSPECIFIED {
+				t.Errorf("chunk %d replica %d state = %v, want UNSPECIFIED", i, j, st)
+			}
+		}
+	}
+}
