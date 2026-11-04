@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -115,7 +116,9 @@ func (s *Server) GetFileMetadata(ctx context.Context, req *gfspb.GetFileMetadata
 		// Version stays 0: files are immutable and Metadata does not track versions yet.
 	}
 	for _, c := range f.Chunks {
-		file.Chunks = append(file.Chunks, toPlacement(c))
+		p := toPlacement(c)
+		p.Replicas = s.orderReplicas(c.Assigned) // healthiest first
+		file.Chunks = append(file.Chunks, p)
 	}
 	return &gfspb.GetFileMetadataResponse{File: file}, nil
 }
@@ -241,6 +244,54 @@ func toPlacement(c *Chunk) *gfspb.ChunkPlacement {
 		})
 	}
 	return p
+}
+
+// replicaRank orders replicas for reads: lower is tried first.
+func replicaRank(st NodeState, known bool) int {
+	switch {
+	case !known:
+		return 1 // never heard from (e.g. no heartbeats yet): neutral
+	case st == NodeHealthy:
+		return 0
+	case st == NodeSuspect:
+		return 2
+	default: // NodeUnavailable
+		return 3
+	}
+}
+
+// orderReplicas returns the replica locations for addrs, healthiest first.
+// Unavailable replicas are kept (last) rather than dropped: the coordinator's
+// view can be wrong, so they remain a last resort for the client.
+func (s *Server) orderReplicas(addrs []string) []*gfspb.ReplicaLocation {
+	type candidate struct {
+		addr  string
+		state NodeState
+		known bool
+	}
+
+	cands := make([]candidate, 0, len(addrs))
+	for _, a := range addrs {
+		st, known := s.registry.StateOf(a)
+		cands = append(cands, candidate{addr: a, state: st, known: known})
+	}
+
+	sort.SliceStable(cands, func(i, j int) bool {
+		return replicaRank(cands[i].state, cands[i].known) < replicaRank(cands[j].state, cands[j].known)
+	})
+
+	out := make([]*gfspb.ReplicaLocation, 0, len(cands))
+	for _, c := range cands {
+		loc := &gfspb.ReplicaLocation{
+			Address: c.addr,
+			State:   gfspb.NodeState_NODE_STATE_UNSPECIFIED,
+		}
+		if c.known {
+			loc.State = toProtoState(c.state)
+		}
+		out = append(out, loc)
+	}
+	return out
 }
 
 // validatePath rejects empty, overlong, or control-character paths.

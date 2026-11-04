@@ -79,6 +79,9 @@ func (r *Registry) Heartbeat(id, addr string, now time.Time) NodeState {
 
 	n.Addr = addr
 	n.LastSeen = now
+	if ok && n.State != NodeHealthy {
+		slog.Info("node recovered", "node_id", id, "addr", addr, "was", n.State.String())
+	}
 	n.State = NodeHealthy // Hearing from it means it is alive
 	return n.State
 }
@@ -123,6 +126,20 @@ func (r *Registry) Healthy() []string {
 	}
 	sort.Strings(out) // map order is random; placement needs a stable order
 	return out
+}
+
+// StateOf Returns the state of the node reachable at addr, and false if no
+// node starts with that address has ever sent a  heartbeat.
+func (r *Registry) StateOf(addr string) (NodeState, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, n := range r.nodes {
+		if n.Addr == addr {
+			return n.State, true
+		}
+	}
+	return NodeHealthy, false
 }
 
 // RunSweeper calls Sweep every interval until ctx is cancelled. Run it in its
