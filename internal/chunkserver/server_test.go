@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -312,6 +313,13 @@ type peerNode struct {
 // so they can forward chunks to each other.
 func startPeers(t *testing.T, n int) []*peerNode {
 	t.Helper()
+	return startPeersWithCoordinator(t, n, nil)
+}
+
+// startPeersWithCoordinator is startPeers with every server reporting stored
+// chunks to coord (nil = no coordinator).
+func startPeersWithCoordinator(t *testing.T, n int, coord gfspb.CoordinatorServiceClient) []*peerNode {
+	t.Helper()
 
 	nodes := make([]*peerNode, n)
 	listeners := map[string]*bufconn.Listener{}
@@ -340,6 +348,9 @@ func startPeers(t *testing.T, n int) []*peerNode {
 		}
 		s := NewServer(fmt.Sprintf("cs%d", i+1), store)
 		s.SetDial(dial) // before serving
+		if coord != nil {
+			s.SetCoordinator(coord)
+		}
 		srv := grpc.NewServer()
 		gfspb.RegisterChunkServerServiceServer(srv, s)
 		go srv.Serve(node.lis)
@@ -412,5 +423,154 @@ func TestWriteChunkFailsWhenReplicaDown(t *testing.T) {
 	_, err := sendWrite(t, clientFor(t, nodes[0]), forwardingWrite("chunk-down", data, nodes[1].addr, nodes[2].addr))
 	if err == nil {
 		t.Fatalf("WriteChunk succeeded although replica %s is down, want an error", nodes[2].addr)
+	}
+}
+
+// reportRecorder is a fake coordinator that records ReportChunk calls.
+// Embedding the interface satisfies the methods we do not need.
+type reportRecorder struct {
+	gfspb.CoordinatorServiceClient
+	mu      sync.Mutex
+	reports []*gfspb.ReportChunkRequest
+}
+
+func (f *reportRecorder) ReportChunk(ctx context.Context, req *gfspb.ReportChunkRequest, _ ...grpc.CallOption) (*gfspb.ReportChunkResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reports = append(f.reports, req)
+	return &gfspb.ReportChunkResponse{}, nil
+}
+
+// reportsFrom returns the reports node made, in order.
+func (f *reportRecorder) reportsFrom(node string) []*gfspb.ReportChunkRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*gfspb.ReportChunkRequest
+	for _, r := range f.reports {
+		if r.GetNodeId() == node {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func copyReq(id string, data []byte, source string) *gfspb.CopyChunkRequest {
+	return &gfspb.CopyChunkRequest{
+		Chunk:  &gfspb.ChunkInfo{ChunkId: id, Length: int64(len(data)), Checksum: sha(data)},
+		Source: &gfspb.ReplicaLocation{Address: source},
+	}
+}
+
+func rpcCtx(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func wantNotStored(t *testing.T, node *peerNode, id string) {
+	t.Helper()
+	if _, err := node.store.Read(id); !errors.Is(err, ErrChunkNotFound) {
+		t.Errorf("%s: Read(%q) error = %v, want ErrChunkNotFound", node.addr, id, err)
+	}
+}
+
+func TestCopyChunk(t *testing.T) {
+	coord := &reportRecorder{}
+	nodes := startPeersWithCoordinator(t, 2, coord)
+	src, dst := nodes[0], nodes[1]
+	data := pattern(200 << 10) // several frames
+	const id = "chunk-copy"
+	if err := src.store.Write(id, data); err != nil {
+		t.Fatalf("seed %s: %v", src.addr, err)
+	}
+
+	resp, err := clientFor(t, dst).CopyChunk(rpcCtx(t), copyReq(id, data, src.addr))
+	if err != nil {
+		t.Fatalf("CopyChunk: %v", err)
+	}
+	if resp.GetChunkId() != id || resp.GetBytesCopied() != int64(len(data)) {
+		t.Errorf("CopyChunk = {%q, %d}, want {%q, %d}", resp.GetChunkId(), resp.GetBytesCopied(), id, len(data))
+	}
+
+	got, err := dst.store.Read(id)
+	if err != nil {
+		t.Fatalf("%s: chunk not stored: %v", dst.addr, err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("%s: stored %d bytes that differ from the source's %d", dst.addr, len(got), len(data))
+	}
+
+	reports := coord.reportsFrom("cs2")
+	if len(reports) != 1 {
+		t.Fatalf("coordinator got %d reports from cs2, want 1", len(reports))
+	}
+	if c := reports[0].GetChunk(); c.GetChunkId() != id || c.GetLength() != int64(len(data)) || !bytes.Equal(c.GetChecksum(), sha(data)) {
+		t.Errorf("report = {%q, %d, %x}, want {%q, %d, %x}", c.GetChunkId(), c.GetLength(), c.GetChecksum(), id, len(data), sha(data))
+	}
+}
+
+func TestCopyChunkWrongChecksum(t *testing.T) {
+	coord := &reportRecorder{}
+	nodes := startPeersWithCoordinator(t, 2, coord)
+	data := pattern(100 << 10)
+	const id = "chunk-badsum"
+	if err := nodes[0].store.Write(id, data); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	req := copyReq(id, data, nodes[0].addr)
+	req.Chunk.Checksum = sha([]byte("something else"))
+	_, err := clientFor(t, nodes[1]).CopyChunk(rpcCtx(t), req)
+	if got := status.Code(err); got != codes.DataLoss {
+		t.Fatalf("CopyChunk with wrong checksum: code = %v (err: %v), want DataLoss", got, err)
+	}
+	wantNotStored(t, nodes[1], id)
+	if n := len(coord.reportsFrom("cs2")); n != 0 {
+		t.Errorf("cs2 sent %d reports for a rejected copy, want 0", n)
+	}
+}
+
+func TestCopyChunkSourceMissing(t *testing.T) {
+	nodes := startPeersWithCoordinator(t, 2, &reportRecorder{})
+	const id = "chunk-nowhere"
+
+	_, err := clientFor(t, nodes[1]).CopyChunk(rpcCtx(t), copyReq(id, []byte("data"), nodes[0].addr))
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Fatalf("CopyChunk from a source without the chunk: code = %v (err: %v), want Unavailable", got, err)
+	}
+	wantNotStored(t, nodes[1], id)
+}
+
+func TestCopyChunkValidation(t *testing.T) {
+	nodes := startPeers(t, 2)
+	client := clientFor(t, nodes[1])
+
+	noID := copyReq("x", []byte("data"), nodes[0].addr)
+	noID.Chunk.ChunkId = ""
+	noSource := copyReq("chunk-x", []byte("data"), nodes[0].addr)
+	noSource.Source = nil
+
+	for name, req := range map[string]*gfspb.CopyChunkRequest{"missing chunk id": noID, "missing source": noSource} {
+		t.Run(name, func(t *testing.T) {
+			_, err := client.CopyChunk(rpcCtx(t), req)
+			if got := status.Code(err); got != codes.InvalidArgument {
+				t.Fatalf("code = %v (err: %v), want InvalidArgument", got, err)
+			}
+		})
+	}
+}
+
+// WriteChunk reports through reportChunk too; no other test has a coordinator.
+func TestWriteChunkReportsToCoordinator(t *testing.T) {
+	coord := &reportRecorder{}
+	nodes := startPeersWithCoordinator(t, 1, coord)
+	data := pattern(100 << 10)
+
+	if _, err := sendWrite(t, clientFor(t, nodes[0]), forwardingWrite("chunk-rep", data)); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+	reports := coord.reportsFrom("cs1")
+	if len(reports) != 1 || reports[0].GetChunk().GetChunkId() != "chunk-rep" || !bytes.Equal(reports[0].GetChunk().GetChecksum(), sha(data)) {
+		t.Fatalf("reports from cs1 = %v, want one for chunk-rep with its checksum", reports)
 	}
 }
