@@ -155,6 +155,110 @@ func (s *Server) SetCoordinator(c gfspb.CoordinatorServiceClient) {
 	s.coord = c
 }
 
+// reportChunk tells coordinator that this node now stores the chunk. It
+// does not do anything if the coordinator is not configured (standalone modes / tests).
+func (s *Server) reportChunk(ctx context.Context, chunkId string, length int64, checksum []byte) error {
+	if s.coord == nil {
+		return nil // no coordinator configured; standalone mode or test
+	}
+
+	rctx, cancel := context.WithTimeout(ctx, reportTimeout)
+	defer cancel()
+	_, err := s.coord.ReportChunk(rctx, &gfspb.ReportChunkRequest{
+		NodeId: s.nodeID,
+		Chunk: &gfspb.ChunkInfo{
+			ChunkId:  chunkId,
+			Length:   length,
+			Checksum: checksum,
+		},
+	})
+	return err
+}
+
+// pullChunk streams a whole chunk from the chunkserver at addr.
+func (s *Server) pullChunk(ctx context.Context, addr, chunkID string) ([]byte, error) {
+	peer, err := s.peer(addr)
+	if err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", addr, err)
+	}
+	stream, err := peer.ReadChunk(ctx, &gfspb.ReadChunkRequest{ChunkId: chunkID})
+	if err != nil {
+		return nil, fmt.Errorf("open read stream: %w", err)
+	}
+
+	// First message must be the header
+	first, err := stream.Recv()
+	if err != nil {
+		return nil, err
+	}
+	header := first.GetHeader()
+	if header == nil {
+		return nil, fmt.Errorf("first message from %s was not a header", addr)
+	}
+	want := header.GetLength()
+	if want < 0 || want > maxChunkSize {
+		return nil, fmt.Errorf("source reported invalid length %d", want)
+	}
+
+	// Collect data frames until the source is done
+	buf := make([]byte, 0, want)
+	for {
+		msg, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		data := msg.GetData()
+		if int64(len(buf)+len(data)) > want {
+			return nil, fmt.Errorf("source sent more than %d bytes", want)
+		}
+		buf = append(buf, data...)
+	}
+	return buf, nil
+}
+
+// CopyChunk pulls a chunk from a source replica, verifies it against the
+// checksum the coordinator recorded, stores it, and reports it. Used for repair.
+func (s *Server) CopyChunk(ctx context.Context, req *gfspb.CopyChunkRequest) (*gfspb.CopyChunkResponse, error) {
+	info := req.GetChunk()
+	src := req.GetSource().GetAddress()
+	if info.GetChunkId() == "" || src == "" {
+		return nil, status.Error(codes.InvalidArgument, "chunk id and source address are required")
+	}
+
+	// 1. Pull the chunk from the healthy source
+	data, err := s.pullChunk(ctx, src, info.GetChunkId())
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "pull  chunk %s from %s: %v", info.GetChunkId(), src, err)
+	}
+
+	// 2. Verify against the coordinator's recorded size and checksum
+	if int64(len(data)) != info.GetLength() {
+		return nil, status.Errorf(codes.DataLoss, "source sent %d bytes, expected %d", len(data), info.GetLength())
+	}
+	sum := sha256.Sum256(data)
+	if !bytes.Equal(sum[:], info.GetChecksum()) {
+		return nil, status.Error(codes.DataLoss, "checksum mismatch: source copy is corrupted")
+	}
+
+	// 3. Store it (atomic write, same as any other chunk)
+	if err := s.store.Write(info.GetChunkId(), data); err != nil {
+		return nil, toStatus(err)
+	}
+
+	// 4. Tell the coordinator we now hold a copy
+	if err := s.reportChunk(ctx, info.GetChunkId(), int64(len(data)), sum[:]); err != nil {
+		return nil, status.Errorf(status.Code(err), "stored copy but could not report it: %v", err)
+	}
+
+	return &gfspb.CopyChunkResponse{
+		ChunkId:     info.GetChunkId(),
+		BytesCopied: int64(len(data)),
+	}, nil
+}
+
 // WriteChunk receives a header message followed by data frames, verifies the
 // checksum, and persists the chunk.
 func (s *Server) WriteChunk(stream grpc.ClientStreamingServer[gfspb.WriteChunkRequest, gfspb.WriteChunkResponse]) error {
@@ -214,20 +318,8 @@ func (s *Server) WriteChunk(stream grpc.ClientStreamingServer[gfspb.WriteChunkRe
 	}
 
 	// Tell the coordinator we have this chunk
-	if s.coord != nil {
-		ctx, cancel := context.WithTimeout(stream.Context(), reportTimeout)
-		defer cancel()
-		_, err := s.coord.ReportChunk(ctx, &gfspb.ReportChunkRequest{
-			NodeId: s.nodeID,
-			Chunk: &gfspb.ChunkInfo{
-				ChunkId:  info.GetChunkId(),
-				Length:   int64(len(buf)),
-				Checksum: sum[:],
-			},
-		})
-		if err != nil {
-			return status.Errorf(status.Code(err), "stored chunk but could not report it to coordinator: %v", err)
-		}
+	if err := s.reportChunk(stream.Context(), info.GetChunkId(), int64(len(buf)), sum[:]); err != nil {
+		return status.Errorf(status.Code(err), "stored chunk but could not report it to coordinator: %v", err)
 	}
 
 	// Pass the chunk down the pipeline (if there is anyone left)
