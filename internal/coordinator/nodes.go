@@ -142,6 +142,21 @@ func (r *Registry) StateOf(addr string) (NodeState, bool) {
 	return NodeHealthy, false
 }
 
+// Unavailable returns the addresses of all Unavailable nodes, as a set
+// (address -> true), ready to pass to Metadata.UnderReplicated.
+func (r *Registry) Unavailable() map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	down := make(map[string]bool)
+	for _, n := range r.nodes {
+		if n.State == NodeUnavailable {
+			down[n.Addr] = true
+		}
+	}
+	return down
+}
+
 // RunSweeper calls Sweep every interval until ctx is cancelled. Run it in its
 // own goroutine.
 func (r *Registry) RunSweeper(ctx context.Context, every time.Duration) {
