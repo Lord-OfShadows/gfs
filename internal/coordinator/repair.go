@@ -130,17 +130,17 @@ func (r *Repairer) repairOne(ctx context.Context, t RepairTask, src, dst string)
 	defer cancel()
 	_, err = cs.CopyChunk(cctx, &gfspb.CopyChunkRequest{
 		Chunk: &gfspb.ChunkInfo{
-			ChunkId:  t.chunkID,
+			ChunkId:  t.ChunkID,
 			Length:   t.Length,
 			Checksum: t.Checksum,
 		},
 		Source: &gfspb.ReplicaLocation{Address: src},
 	})
 	if err != nil {
-		return fmt.Errorf("copy %s from %s to %s: %w", t.chunkID, src, dst, err)
+		return fmt.Errorf("copy %s from %s to %s: %w", t.ChunkID, src, dst, err)
 	}
 
-	return r.md.AddReplica(t.chunkID, dst)
+	return r.md.AddReplica(t.ChunkID, dst)
 }
 
 // RunOnce runs one repair round: it finds under-replicated chunks and copies
@@ -178,10 +178,10 @@ func (r *Repairer) RunOnce(ctx context.Context) int {
 			defer func() { <-sem }() // give the slot back
 
 			if err := r.repairOne(ctx, t, src, dst); err != nil {
-				slog.Warn("repair failed", "chunk_id", t.chunkID, "src", src, "dst", dst, "err", err)
+				slog.Warn("repair failed", "chunk_id", t.ChunkID, "src", src, "dst", dst, "err", err)
 				return
 			}
-			slog.Info("chunk re-replicated", "chunk_id", t.chunkID, "src", src, "dst", dst)
+			slog.Info("chunk re-replicated", "chunk_id", t.ChunkID, "src", src, "dst", dst)
 			mu.Lock()
 			repaired++
 			mu.Unlock()

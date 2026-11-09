@@ -394,7 +394,7 @@ func TestUnderReplicated(t *testing.T) {
 			}
 			byID := map[string]RepairTask{}
 			for _, task := range got {
-				byID[task.chunkID] = task
+				byID[task.ChunkID] = task
 			}
 			for _, c := range f.Chunks {
 				task, ok := byID[c.ID]
@@ -513,7 +513,7 @@ func TestAddReplicaResolvesUnderReplication(t *testing.T) {
 	}
 
 	got := m.UnderReplicated(down, 3)
-	if len(got) != 1 || got[0].chunkID != f.Chunks[1].ID {
+	if len(got) != 1 || got[0].ChunkID != f.Chunks[1].ID {
 		t.Fatalf("after repairing chunk 0: tasks = %+v, want only chunk 1 (%s)", got, f.Chunks[1].ID)
 	}
 }

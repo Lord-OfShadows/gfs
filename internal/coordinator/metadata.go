@@ -62,7 +62,7 @@ type FileSummary struct {
 
 // describes a chunk with fewer live copies than wanted
 type RepairTask struct {
-	chunkID  string
+	ChunkID  string
 	Length   int64
 	Checksum []byte
 	Live     []string // Addresses that still hold a copy (possible sources)
@@ -322,7 +322,7 @@ func (m *Metadata) UnderReplicated(down map[string]bool, want int) []RepairTask 
 				continue // nothing to copy from, or enough copies already
 			}
 			tasks = append(tasks, RepairTask{
-				chunkID:  c.ID,
+				ChunkID:  c.ID,
 				Length:   c.Length,
 				Checksum: bytes.Clone(c.Checksum),
 				Live:     live,
