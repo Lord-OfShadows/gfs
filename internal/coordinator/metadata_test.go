@@ -315,3 +315,246 @@ func TestConcurrentAccess(t *testing.T) {
 		t.Errorf("ListFiles after concurrent creates: %d files, want %d", got, workers)
 	}
 }
+
+var repairNodes = []string{"a", "b", "c"}
+
+// mustCreateOn creates a pending file whose chunks are placed on nodes.
+func mustCreateOn(t *testing.T, m *Metadata, path string, nodes []string, contents ...string) *File {
+	t.Helper()
+	f, err := m.CreateFile("op-"+path, path, specsFor(contents...), nodes)
+	if err != nil {
+		t.Fatalf("CreateFile(%q): %v", path, err)
+	}
+	return f
+}
+
+// visibleOn creates a file on repairNodes and reports every chunk from a
+// distinct node per replica, so it becomes visible.
+func visibleOn(t *testing.T, m *Metadata, path string, contents ...string) *File {
+	t.Helper()
+	f := mustCreateOn(t, m, path, repairNodes, contents...)
+	for _, c := range f.Chunks {
+		for _, addr := range c.Assigned {
+			if err := m.ReportChunk("node-"+addr, c.ID, c.Checksum); err != nil {
+				t.Fatalf("ReportChunk(%q from %s): %v", c.ID, addr, err)
+			}
+		}
+	}
+	if _, err := m.GetFile(path); err != nil {
+		t.Fatalf("GetFile(%q) after reporting every replica: %v", path, err)
+	}
+	return f
+}
+
+// without returns addrs minus every address in drop, keeping order.
+func without(addrs []string, drop map[string]bool) []string {
+	var out []string
+	for _, a := range addrs {
+		if !drop[a] {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func TestUnderReplicated(t *testing.T) {
+	tests := []struct {
+		name    string
+		down    map[string]bool
+		want    int
+		pending bool // leave the file pending (not visible)
+		tasks   bool // expect one task per chunk
+	}{
+		{name: "all nodes up", down: map[string]bool{}, want: 3},
+		{name: "one replica down", down: map[string]bool{"b": true}, want: 3, tasks: true},
+		{name: "every replica down", down: map[string]bool{"a": true, "b": true, "c": true}, want: 3},
+		{name: "pending file", down: map[string]bool{"b": true}, want: 3, pending: true},
+		{name: "enough live copies for want=2", down: map[string]bool{"c": true}, want: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewMetadata()
+			var f *File
+			if tc.pending {
+				f = mustCreateOn(t, m, "/a.bin", repairNodes, "one", "two", "three")
+			} else {
+				f = visibleOn(t, m, "/a.bin", "one", "two", "three")
+			}
+
+			got := m.UnderReplicated(tc.down, tc.want)
+			if !tc.tasks {
+				if len(got) != 0 {
+					t.Fatalf("UnderReplicated = %+v, want no tasks", got)
+				}
+				return
+			}
+
+			if len(got) != len(f.Chunks) {
+				t.Fatalf("got %d tasks, want one per chunk (%d)", len(got), len(f.Chunks))
+			}
+			byID := map[string]RepairTask{}
+			for _, task := range got {
+				byID[task.ChunkID] = task
+			}
+			for _, c := range f.Chunks {
+				task, ok := byID[c.ID]
+				if !ok {
+					t.Errorf("no task for chunk %d (%s)", c.Index, c.ID)
+					continue
+				}
+				if task.Length != c.Length || !bytes.Equal(task.Checksum, c.Checksum) {
+					t.Errorf("chunk %d task = {Length %d, Checksum %x}, want {%d, %x}", c.Index, task.Length, task.Checksum, c.Length, c.Checksum)
+				}
+				// Placement rotates per chunk, so compare against this chunk's own order.
+				if want := without(c.Assigned, tc.down); !slices.Equal(task.Live, want) {
+					t.Errorf("chunk %d Live = %v, want %v", c.Index, task.Live, want)
+				}
+				if !slices.Equal(task.Assigned, c.Assigned) {
+					t.Errorf("chunk %d Assigned = %v, want %v", c.Index, task.Assigned, c.Assigned)
+				}
+				if s := slices.Sorted(slices.Values(task.Live)); !slices.Equal(s, []string{"a", "c"}) {
+					t.Errorf("chunk %d Live = %v, want a and c", c.Index, task.Live)
+				}
+				if s := slices.Sorted(slices.Values(task.Assigned)); !slices.Equal(s, repairNodes) {
+					t.Errorf("chunk %d Assigned = %v, want a, b and c", c.Index, task.Assigned)
+				}
+			}
+		})
+	}
+}
+
+func TestUnderReplicatedReturnsCopies(t *testing.T) {
+	m := NewMetadata()
+	visibleOn(t, m, "/a.bin", "data")
+	down := map[string]bool{"b": true}
+
+	tasks := m.UnderReplicated(down, 3)
+	if len(tasks) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(tasks))
+	}
+	before, err := m.GetFile("/a.bin")
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+
+	// Scribble over every slice the task carries.
+	tasks[0].Checksum[0] ^= 0xFF
+	tasks[0].Live[0] = "evil"
+	tasks[0].Assigned[0] = "evil"
+
+	after, err := m.GetFile("/a.bin")
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+	b, a := before.Chunks[0], after.Chunks[0]
+	if !bytes.Equal(a.Checksum, b.Checksum) {
+		t.Error("stored Checksum changed through the returned task")
+	}
+	if !slices.Equal(a.Assigned, b.Assigned) {
+		t.Errorf("stored Assigned = %v, want %v", a.Assigned, b.Assigned)
+	}
+	again := m.UnderReplicated(down, 3)
+	if want := without(b.Assigned, down); len(again) != 1 || !slices.Equal(again[0].Live, want) {
+		t.Errorf("UnderReplicated after mutation = %+v, want one task with Live %v", again, want)
+	}
+}
+
+func TestAddReplica(t *testing.T) {
+	tests := []struct {
+		name  string
+		adds  []string
+		extra []string // addresses expected after the original Assigned
+	}{
+		{name: "new address", adds: []string{"d"}, extra: []string{"d"}},
+		{name: "same address twice", adds: []string{"d", "d"}, extra: []string{"d"}},
+		{name: "already assigned", adds: []string{"a"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewMetadata()
+			f := visibleOn(t, m, "/a.bin", "data")
+			c := f.Chunks[0]
+
+			for _, addr := range tc.adds {
+				if err := m.AddReplica(c.ID, addr); err != nil {
+					t.Fatalf("AddReplica(%q): %v", addr, err)
+				}
+			}
+
+			got, err := m.GetFile("/a.bin")
+			if err != nil {
+				t.Fatalf("GetFile: %v", err)
+			}
+			want := append(slices.Clone(c.Assigned), tc.extra...)
+			if !slices.Equal(got.Chunks[0].Assigned, want) {
+				t.Errorf("Assigned = %v, want %v", got.Chunks[0].Assigned, want)
+			}
+		})
+	}
+}
+
+func TestAddReplicaUnknownChunk(t *testing.T) {
+	m := NewMetadata()
+	if err := m.AddReplica("no-such-chunk", "d"); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("AddReplica(unknown) error = %v, want ErrChunkNotFound", err)
+	}
+}
+
+func TestAddReplicaResolvesUnderReplication(t *testing.T) {
+	m := NewMetadata()
+	f := visibleOn(t, m, "/a.bin", "one", "two")
+	down := map[string]bool{"b": true}
+
+	if got := m.UnderReplicated(down, 3); len(got) != 2 {
+		t.Fatalf("before repair: %d tasks, want 2", len(got))
+	}
+	if err := m.AddReplica(f.Chunks[0].ID, "d"); err != nil {
+		t.Fatalf("AddReplica: %v", err)
+	}
+
+	got := m.UnderReplicated(down, 3)
+	if len(got) != 1 || got[0].ChunkID != f.Chunks[1].ID {
+		t.Fatalf("after repairing chunk 0: tasks = %+v, want only chunk 1 (%s)", got, f.Chunks[1].ID)
+	}
+}
+
+// TestConcurrentRepair runs UnderReplicated, AddReplica and GetFile from many
+// goroutines at once. It mostly exists for `go test -race`.
+func TestConcurrentRepair(t *testing.T) {
+	m := NewMetadata()
+	f := visibleOn(t, m, "/a.bin", "one", "two", "three", "four")
+	down := map[string]bool{"b": true}
+	const workers, newAddrs = 50, 5 // 50 >= 4*5, so every chunk gets all 5 new addresses
+
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, task := range m.UnderReplicated(down, 3) {
+				task.Live[0] = "scribble" // writing our own copy must not race with anyone
+			}
+			c := f.Chunks[i%len(f.Chunks)]
+			if err := m.AddReplica(c.ID, fmt.Sprintf("new-%d", i%newAddrs)); err != nil {
+				t.Errorf("AddReplica: %v", err)
+			}
+			if _, err := m.GetFile("/a.bin"); err != nil {
+				t.Errorf("GetFile: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := m.UnderReplicated(down, 3); len(got) != 0 {
+		t.Errorf("after every chunk got new replicas: %d tasks left, want 0", len(got))
+	}
+	got, err := m.GetFile("/a.bin")
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+	for _, c := range got.Chunks {
+		if want := len(repairNodes) + newAddrs; len(c.Assigned) != want {
+			t.Errorf("chunk %d has %d Assigned addresses, want %d", c.Index, len(c.Assigned), want)
+		}
+	}
+}

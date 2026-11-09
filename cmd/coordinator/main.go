@@ -45,7 +45,8 @@ func run(addr string, chunkservers []string) error {
 		grpc.ChainUnaryInterceptor(grpclog.UnaryServerInterceptor),
 		grpc.ChainStreamInterceptor(grpclog.StreamServerInterceptor),
 	)
-	srv := coordinator.NewServer(coordinator.NewMetadata(), chunkservers)
+	md := coordinator.NewMetadata()
+	srv := coordinator.NewServer(md, chunkservers)
 	gfspb.RegisterCoordinatorServiceServer(grpcServer, srv)
 
 	// Stop cleanly on Ctrl+C (SIGINT) or SIGTERM (what `docker stop` sends).
@@ -58,6 +59,12 @@ func run(addr string, chunkservers []string) error {
 	}()
 
 	go srv.Registry().RunSweeper(ctx, coordinator.SweepEvery)
+
+	// The repairer shares the server's Metadata and Registry: it reads which
+	// nodes are down and records the new replicas it creates.
+	repairer := coordinator.NewRepairer(md, srv.Registry(), coordinator.RepairWorkers)
+	defer repairer.Close()
+	go repairer.Run(ctx, coordinator.RepairEvery)
 
 	slog.Info("coordinator started", "addr", lis.Addr().String(), "chunkservers", chunkservers)
 	return grpcServer.Serve(lis)

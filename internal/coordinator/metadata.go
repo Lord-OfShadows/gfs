@@ -60,6 +60,15 @@ type FileSummary struct {
 	CreatedAt time.Time
 }
 
+// describes a chunk with fewer live copies than wanted
+type RepairTask struct {
+	ChunkID  string
+	Length   int64
+	Checksum []byte
+	Live     []string // Addresses that still hold a copy (possible sources)
+	Assigned []string // every address that has ever held it (never pick these as destinations)
+}
+
 // Metadata is the coordinator's in-memory namespace and chunk map.
 // All fields are protected by mu; never return internal pointers to callers.
 type Metadata struct {
@@ -287,5 +296,56 @@ func (m *Metadata) ReportChunk(nodeID, chunkID string, checksum []byte) error {
 		return nil
 	}
 
+	return nil
+}
+
+// UnderReplicated returns a task for every chunk of a visible file that has
+// fewer than want copies outside the down set. Chunks with no live copy at all
+// are skipped: there is nothing to copy from until a node comes back.
+func (m *Metadata) UnderReplicated(down map[string]bool, want int) []RepairTask {
+	m.mu.RLock() // read-only scan: shared lock
+	defer m.mu.RUnlock()
+
+	var tasks []RepairTask
+	for _, f := range m.files {
+		if !f.Visible {
+			continue // pending uploads are still being written; not our job yet
+		}
+		for _, c := range f.Chunks {
+			var live []string
+			for _, addr := range c.Assigned {
+				if !down[addr] {
+					live = append(live, addr)
+				}
+			}
+			if len(live) == 0 || len(live) >= want {
+				continue // nothing to copy from, or enough copies already
+			}
+			tasks = append(tasks, RepairTask{
+				ChunkID:  c.ID,
+				Length:   c.Length,
+				Checksum: bytes.Clone(c.Checksum),
+				Live:     live,
+				Assigned: slices.Clone(c.Assigned),
+			})
+		}
+	}
+	return tasks
+}
+
+// AddReplica records that addr now holds a copy of chunkID. Recording the
+// same address twice is a no-op, so retries are safe.
+func (m *Metadata) AddReplica(chunkID, addr string) error {
+	m.mu.Lock() // we change Assigned: exclusive lock
+	defer m.mu.Unlock()
+
+	c, ok := m.chunks[chunkID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrChunkNotFound, chunkID)
+	}
+	if slices.Contains(c.Assigned, addr) {
+		return nil // already recorded
+	}
+	c.Assigned = append(c.Assigned, addr)
 	return nil
 }
