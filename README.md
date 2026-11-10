@@ -210,9 +210,6 @@ The tests run without Docker or the network. gRPC runs over in-memory `bufconn` 
   - **Repair:** `UnderReplicated` and `AddReplica` cases, and an end-to-end repair over 4 in-memory chunkservers where one is marked Unavailable. `RunOnce` must copy every affected chunk to a node that didn't have it, with identical bytes, and leave nothing under-replicated. It must make no calls when nothing is down, and `Run` must stop on cancel.
 - **`internal/client`:** upload/download round trip through a coordinator and chunkservers; detecting a corrupted chunk; failed uploads not listed; delete; a replicated upload that is still readable after a node is lost.
 
-## Performance
-
-Measured detection and repair times: coming soon (see docs)
 
 ## Known limitations / future work
 
