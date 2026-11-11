@@ -23,7 +23,7 @@ var (
 	ErrNoChunkservers   = errors.New("no chunkservers available")
 )
 
-// How many copies of each chunk we try to keep
+// How many copies of each chunk we try to keep, unless SetReplication changes it
 const ReplicationFactor = 3
 
 // ChunkSpec is what the client tells us about a chunk before uploading it.
@@ -72,19 +72,36 @@ type RepairTask struct {
 // Metadata is the coordinator's in-memory namespace and chunk map.
 // All fields are protected by mu; never return internal pointers to callers.
 type Metadata struct {
-	mu     sync.RWMutex
-	files  map[string]*File  // path -> file
-	chunks map[string]*Chunk // chunk ID -> chunk (same *Chunk as in File.Chunks)
-	ops    map[string]string // operation ID -> path, for idempotent CreateFile retries
+	mu          sync.RWMutex
+	files       map[string]*File  // path -> file
+	chunks      map[string]*Chunk // chunk ID -> chunk (same *Chunk as in File.Chunks)
+	ops         map[string]string // operation ID -> path, for idempotent CreateFile retries
+	replication int               // copies to place and keep of each chunk (default ReplicationFactor)
 }
 
 // NewMetadata returns an empty Metadata.
 func NewMetadata() *Metadata {
 	return &Metadata{
-		files:  make(map[string]*File),
-		chunks: make(map[string]*Chunk),
-		ops:    make(map[string]string),
+		files:       make(map[string]*File),
+		chunks:      make(map[string]*Chunk),
+		ops:         make(map[string]string),
+		replication: ReplicationFactor,
 	}
+}
+
+// SetReplication sets how many copies of each chunk to place and keep.
+// Call it before serving; n must be at least 1.
+func (m *Metadata) SetReplication(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.replication = n
+}
+
+// Replication returns how many copies of each chunk to place and keep.
+func (m *Metadata) Replication() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.replication
 }
 
 // newID returns a random 128-bit ID as 32 hex characters.
@@ -179,8 +196,8 @@ func (m *Metadata) CreateFile(opID, path string, specs []ChunkSpec, nodes []stri
 			FileID:   f.ID,
 			Index:    i,
 			Length:   spec.Length,
-			Checksum: bytes.Clone(spec.Checksum),             // own copy: the caller may reuse its slice
-			Assigned: pickNodes(nodes, i, ReplicationFactor), // spread chunks across nodes (Round Robin)
+			Checksum: bytes.Clone(spec.Checksum),         // own copy: the caller may reuse its slice
+			Assigned: pickNodes(nodes, i, m.replication), // spread chunks across nodes (Round Robin)
 			Replicas: map[string]bool{},
 		}
 		f.Chunks = append(f.Chunks, c)

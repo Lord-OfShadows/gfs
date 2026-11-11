@@ -157,7 +157,7 @@ func (r *Repairer) RunOnce(ctx context.Context) int {
 		healthySet[addr] = true
 	}
 
-	tasks := r.md.UnderReplicated(down, ReplicationFactor)
+	tasks := r.md.UnderReplicated(down, r.md.Replication())
 
 	sem := make(chan struct{}, r.workers) // at most r.workers copies at once
 	var wg sync.WaitGroup

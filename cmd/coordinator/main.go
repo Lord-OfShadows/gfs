@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -21,17 +22,21 @@ import (
 func main() {
 	addr := flag.String("addr", ":7000", "address to listen on (host:port)")
 	chunkservers := flag.String("chunkservers", "localhost:7001", "comma-separated chunkserver addresses")
+	replication := flag.Int("replication", coordinator.ReplicationFactor, "copies to keep of each chunk")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
-	if err := run(*addr, splitList(*chunkservers)); err != nil {
+	if err := run(*addr, splitList(*chunkservers), *replication); err != nil {
 		slog.Error("coordinator exited", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(addr string, chunkservers []string) error {
+func run(addr string, chunkservers []string, replication int) error {
+	if replication < 1 {
+		return fmt.Errorf("--replication must be at least 1, got %d", replication)
+	}
 	if len(chunkservers) == 0 {
 		slog.Warn("no chunkservers configured; only empty files can be created")
 	}
@@ -46,6 +51,7 @@ func run(addr string, chunkservers []string) error {
 		grpc.ChainStreamInterceptor(grpclog.StreamServerInterceptor),
 	)
 	md := coordinator.NewMetadata()
+	md.SetReplication(replication)
 	srv := coordinator.NewServer(md, chunkservers)
 	gfspb.RegisterCoordinatorServiceServer(grpcServer, srv)
 
@@ -66,7 +72,7 @@ func run(addr string, chunkservers []string) error {
 	defer repairer.Close()
 	go repairer.Run(ctx, coordinator.RepairEvery)
 
-	slog.Info("coordinator started", "addr", lis.Addr().String(), "chunkservers", chunkservers)
+	slog.Info("coordinator started", "addr", lis.Addr().String(), "chunkservers", chunkservers, "replication", replication)
 	return grpcServer.Serve(lis)
 }
 
