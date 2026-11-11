@@ -28,3 +28,6 @@ Thumbs.db
 # files moved in/out of the Docker client container
 /transfer/*
 !/transfer/.gitkeep
+
+# benchmark output (scripts/bench-failover.ps1)
+/results/
