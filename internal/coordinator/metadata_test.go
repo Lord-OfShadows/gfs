@@ -78,6 +78,20 @@ func TestCreateFile(t *testing.T) {
 	}
 }
 
+func TestCreateFileReplicationOne(t *testing.T) {
+	m := NewMetadata()
+	m.SetReplication(1)
+	f, err := m.CreateFile("op-1", "/a.bin", specsFor("one", "two", "three", "four"), []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	for _, c := range f.Chunks {
+		if len(c.Assigned) != 1 {
+			t.Errorf("chunk %d Assigned = %v, want exactly one node with replication 1", c.Index, c.Assigned)
+		}
+	}
+}
+
 func TestCreateFileEmptyIsVisibleImmediately(t *testing.T) {
 	m := NewMetadata()
 

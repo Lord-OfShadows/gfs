@@ -152,3 +152,86 @@ function Format-Event {
         default { return "$when  $($Entry.Msg)" }
     }
 }
+
+# ConvertFrom-GoDuration turns a Go time.Duration string as the CLI prints it
+# ("769ms", "1.2s", "1m2.5s") into milliseconds. Returns $null if it can't.
+function ConvertFrom-GoDuration {
+    param([Parameter(Mandatory)][string]$Text)
+    $parts = [regex]::Matches($Text, '(\d+(?:\.\d+)?)(ms|h|m|s)')
+    if ($parts.Count -eq 0) { return $null }
+    $ms = 0.0
+    foreach ($p in $parts) {
+        $v = [double]::Parse($p.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
+        switch ($p.Groups[2].Value) {
+            'h' { $ms += $v * 3600000 }
+            'm' { $ms += $v * 60000 }
+            's' { $ms += $v * 1000 }
+            'ms' { $ms += $v }
+        }
+    }
+    return [math]::Round($ms)
+}
+
+# Invoke-Gfs runs one CLI command in a named one-off container and returns
+# { Ok, Ms, Started, Output, Error }. Ms is the duration the CLI itself prints
+# ("... in 769ms"), which excludes container startup. Started is when the
+# container started, by the Docker VM's clock (comparable with Get-StopTime
+# and coordinator log times).
+function Invoke-Gfs {
+    param([Parameter(Mandatory)][string[]]$GfsArgs)
+    $ErrorActionPreference = 'Continue' # compose writes progress to stderr
+    $name = 'gfs-bench-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $out = @(& docker compose run --name $name gfs @GfsArgs 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+    $started = $null
+    $raw = & docker inspect -f '{{.State.StartedAt}}' $name 2>$null
+    if ($LASTEXITCODE -eq 0 -and "$raw".Trim()) { $started = ConvertTo-UtcTime "$raw" }
+    & docker rm -f $name 2>&1 | Out-Null
+
+    $ms = $null
+    foreach ($line in $out) {
+        if ($line -match '^(uploaded|downloaded) .* in (\S+)$') { $ms = ConvertFrom-GoDuration $Matches[2] }
+    }
+    $err = $out | Where-Object { $_ -match 'error|failed|Error' } | Select-Object -Last 1
+    return [pscustomobject]@{
+        Ok      = ($code -eq 0 -and $null -ne $ms)
+        Ms      = $ms
+        Started = $started
+        Output  = $out
+        Error   = "$err"
+    }
+}
+
+# Wait-CoordinatorEvent polls the coordinator log since Since (RFC 3339) and
+# returns the first event matching Match (a script block over $_), or $null
+# after TimeoutSec.
+function Wait-CoordinatorEvent {
+    param([Parameter(Mandatory)][string]$Since, [Parameter(Mandatory)][scriptblock]$Match, [int]$TimeoutSec = 60)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $e = @(Get-CoordinatorEvents -Since $Since) | Where-Object -FilterScript $Match | Select-Object -First 1
+        if ($e) { return $e }
+        Start-Sleep -Milliseconds 250
+    }
+    return $null
+}
+
+# Get-Stats returns min / median / p95 (nearest rank) / max of Values.
+function Get-Stats([double[]]$Values) {
+    $s = $Values | Sort-Object
+    $n = $s.Count
+    if ($n % 2 -eq 1) { $median = $s[($n - 1) / 2] } else { $median = ($s[$n / 2 - 1] + $s[$n / 2]) / 2 }
+    $p95 = $s[[math]::Ceiling(0.95 * $n) - 1]
+    return [pscustomobject]@{ Min = $s[0]; Median = $median; P95 = $p95; Max = $s[$n - 1] }
+}
+
+# Write-Environment prints the Docker and host details a result depends on.
+function Write-Environment {
+    $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim()
+    $os = Get-CimInstance Win32_OperatingSystem
+    $mem = [math]::Round([double](& docker info --format '{{.MemTotal}}') / 1GB, 1)
+    Write-Host 'Environment:'
+    Write-Host "  Docker:      $(& docker version --format '{{.Server.Version}}') ($(& docker info --format '{{.OperatingSystem}}'), $(& docker info --format '{{.NCPU}}') CPUs, $mem GiB for the Docker VM)"
+    Write-Host "  Host CPU:    $cpu, $([Environment]::ProcessorCount) logical processors"
+    Write-Host "  Host OS:     $($os.Caption) $($os.Version)"
+}

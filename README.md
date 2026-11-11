@@ -222,6 +222,21 @@ Failover, measured over 20 runs on a single laptop (Docker Compose, 4 chunkserve
 
 Detection time is set by the liveness thresholds (heartbeat every 1 s, Unavailable after 3 s of silence); repair time is mostly the wait for the next 2-second repair round.
 
+Latency, as reported by the CLI itself (10 runs per scenario, 20 MB files; details in [docs/benchmarks.md](docs/benchmarks.md#latency)):
+
+| | median | p95 |
+|---|---|---|
+| Upload, 1 replica | 0.81 s | 0.99 s |
+| Upload, 3 replicas | 0.99 s | 1.55 s |
+| Download, normal | 0.51 s | 0.95 s |
+| Download while 79 chunks are being re-replicated | 0.62 s | 1.14 s |
+| Download right after a replica dies (not yet detected) | 4.41 s | 4.57 s |
+| Download after the dead node is detected | 0.50 s | 0.54 s |
+| Upload right after a replica dies (not yet detected) | 5 of 9 failed | |
+| Upload after the dead node is detected | 1.01 s (9 of 9 succeeded) | 1.13 s |
+
+The weak spot is the detection window of up to about 3 s: until the coordinator marks a dead node Unavailable, reads that try it first stall for about 4 s and writes whose chain includes it fail. Both return to normal once the node is detected.
+
 ## Known limitations / future work
 
 - **In-memory metadata:** the coordinator's namespace and chunk map are lost when it restarts.
@@ -231,6 +246,8 @@ Detection time is set by the liveness thresholds (heartbeat every 1 s, Unavailab
 - **Whole-operation CLI timeout:** the CLI has one 60 s timeout for the entire operation, so very large files fail; it should be per chunk.
 - **Sequential uploads:** chunks are uploaded one at a time.
 - **No auth or TLS:** all gRPC traffic is plaintext and unauthenticated.
+- **Reads can stall on a just-died replica:** until the node is detected, a download that tries it first waits about 4 s before falling back, because there's no short per-attempt timeout.
+- **Writes can fail during the detection window:** for about 3 s after a node dies, uploads whose chain includes it fail, and the client doesn't retry automatically.
 
 ## Layout
 

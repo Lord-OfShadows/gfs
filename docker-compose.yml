@@ -18,7 +18,7 @@ services:
   coordinator:
     build: .
     image: gfs:local
-    command: ["/coordinator", "--addr", ":7000", "--chunkservers", "cs1:7001,cs2:7001,cs3:7001,cs4:7001"]
+    command: ["/coordinator", "--addr", ":7000", "--chunkservers", "cs1:7001,cs2:7001,cs3:7001,cs4:7001", "--replication", "${GFS_REPLICATION:-3}"]
     restart: unless-stopped
     networks: [gfs]
 
