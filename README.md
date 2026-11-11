@@ -210,6 +210,17 @@ The tests run without Docker or the network. gRPC runs over in-memory `bufconn` 
   - **Repair:** `UnderReplicated` and `AddReplica` cases, and an end-to-end repair over 4 in-memory chunkservers where one is marked Unavailable. `RunOnce` must copy every affected chunk to a node that didn't have it, with identical bytes, and leave nothing under-replicated. It must make no calls when nothing is down, and `Run` must stop on cancel.
 - **`internal/client`:** upload/download round trip through a coordinator and chunkservers; detecting a corrupted chunk; failed uploads not listed; delete; a replicated upload that is still readable after a node is lost.
 
+## Performance
+
+Failover, measured over 20 runs on a single laptop (Docker Compose, 4 chunkservers, 20 MB file; details and method in [docs/benchmarks.md](docs/benchmarks.md)):
+
+| | median | p95 |
+|---|---|---|
+| Failure detection (node stops → marked Unavailable) | 2.8 s | 3.1 s |
+| Repair (Unavailable → every chunk back to 3 replicas) | 0.6 s | 1.6 s |
+| Total time to heal | 3.4 s | 3.8 s |
+
+Detection time is set by the liveness thresholds (heartbeat every 1 s, Unavailable after 3 s of silence); repair time is mostly the wait for the next 2-second repair round.
 
 ## Known limitations / future work
 
