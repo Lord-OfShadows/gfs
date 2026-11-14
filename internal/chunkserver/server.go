@@ -25,8 +25,8 @@ const forwardTimeout = 30 * time.Second // deadline for forwarding one chunk dow
 
 // Server implements gfspb.ChunkServerServiceServer on top of a Store.
 type Server struct {
-	// Embedded by value: supplies an "Unimplemented" answer for every RPC we
-	// have not written yet (e.g. CopyChunk), and is required by the generated code.
+	// Embedded by value: required by the generated code, and answers
+	// "Unimplemented" for any RPC added to the proto but not written here yet.
 	gfspb.UnimplementedChunkServerServiceServer
 
 	nodeID string

@@ -60,7 +60,7 @@ type FileSummary struct {
 	CreatedAt time.Time
 }
 
-// describes a chunk with fewer live copies than wanted
+// RepairTask describes a chunk with fewer live copies than wanted.
 type RepairTask struct {
 	ChunkID  string
 	Length   int64
