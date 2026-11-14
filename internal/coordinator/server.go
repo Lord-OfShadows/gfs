@@ -155,8 +155,8 @@ func (s *Server) DeleteFile(ctx context.Context, req *gfspb.DeleteFileRequest) (
 // deleteChunks makes a best-effort DeleteChunk call for every chunk on every
 // address it was assigned to. It opens one connection per chunkserver.
 //
-// TODO(M4): chunks whose deletion fails become orphans on disk. Garbage
-// collection (comparing chunkserver inventories with metadata) cleans them up.
+// TODO: chunks whose deletion fails become orphans on disk. Garbage
+// collection (comparing chunkserver inventories with metadata) would clean them up.
 func (s *Server) deleteChunks(chunks []*Chunk) {
 	byAddr := map[string][]string{} // address -> chunk IDs
 	for _, c := range chunks {
@@ -225,9 +225,8 @@ func toProtoState(s NodeState) gfspb.NodeState {
 
 // toPlacement converts a Chunk to the protobuf form sent to clients.
 //
-// TODO(M4): replicas come from the chunk's Assigned addresses. Once
-// heartbeats build a node registry (node ID -> address, state), return the
-// nodes in Chunk.Replicas with their real state instead.
+// Replicas are the chunk's Assigned addresses, in order, without a state;
+// GetFileMetadata replaces them with orderReplicas (health-ordered, with state).
 func toPlacement(c *Chunk) *gfspb.ChunkPlacement {
 	p := &gfspb.ChunkPlacement{
 		Chunk: &gfspb.ChunkInfo{
@@ -240,7 +239,7 @@ func toPlacement(c *Chunk) *gfspb.ChunkPlacement {
 	for _, addr := range c.Assigned {
 		p.Replicas = append(p.Replicas, &gfspb.ReplicaLocation{
 			Address: addr,
-			State:   gfspb.NodeState_NODE_STATE_UNSPECIFIED, // unknown until M4
+			State:   gfspb.NodeState_NODE_STATE_UNSPECIFIED, // set by orderReplicas for reads
 		})
 	}
 	return p

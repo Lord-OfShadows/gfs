@@ -128,8 +128,8 @@ func (r *Registry) Healthy() []string {
 	return out
 }
 
-// StateOf Returns the state of the node reachable at addr, and false if no
-// node starts with that address has ever sent a  heartbeat.
+// StateOf returns the state of the node reachable at addr, and false if no
+// node with that address has ever sent a heartbeat.
 func (r *Registry) StateOf(addr string) (NodeState, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
