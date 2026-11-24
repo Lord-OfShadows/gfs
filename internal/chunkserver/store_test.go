@@ -99,3 +99,66 @@ func TestStoreRejectsBadChunkIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestStoreStats(t *testing.T) {
+	tests := []struct {
+		name       string
+		chunks     map[string][]byte
+		otherFiles map[string][]byte
+		wantCount  int64
+		wantBytes  int64
+	}{
+		{name: "empty store"},
+		{
+			name:      "stored chunks including empty chunk",
+			chunks:    map[string][]byte{"first": []byte("abc"), "second": []byte("defgh"), "empty": {}},
+			wantCount: 3,
+			wantBytes: 8,
+		},
+		{
+			name:       "leftover temporary file",
+			chunks:     map[string][]byte{"first": []byte("abc")},
+			otherFiles: map[string][]byte{"first-123.tmp": []byte("unfinished write")},
+			wantCount:  1,
+			wantBytes:  3,
+		},
+		{
+			name:       "unrelated files",
+			chunks:     map[string][]byte{"first": []byte("abc")},
+			otherFiles: map[string][]byte{"notes.txt": []byte("notes"), "first.chunk.tmp": []byte("unfinished write")},
+			wantCount:  1,
+			wantBytes:  3,
+		},
+		{
+			name:       "only temporary files",
+			otherFiles: map[string][]byte{"orphan-123.tmp": []byte("unfinished write")},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			for id, data := range tc.chunks {
+				if err := s.Write(id, data); err != nil {
+					t.Fatalf("Write(%q): %v", id, err)
+				}
+			}
+			for name, data := range tc.otherFiles {
+				if err := os.WriteFile(filepath.Join(s.root, name), data, 0o600); err != nil {
+					t.Fatalf("WriteFile(%q): %v", name, err)
+				}
+			}
+			if err := os.Mkdir(filepath.Join(s.root, "directory.chunk"), 0o755); err != nil {
+				t.Fatalf("Mkdir: %v", err)
+			}
+
+			count, used, err := s.Stats()
+			if err != nil {
+				t.Fatalf("Stats: %v", err)
+			}
+			if count != tc.wantCount || used != tc.wantBytes {
+				t.Errorf("Stats = (%d, %d), want (%d, %d)", count, used, tc.wantCount, tc.wantBytes)
+			}
+		})
+	}
+}

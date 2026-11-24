@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Errors returned by Store. Callers compare with errors.Is, e.g.
@@ -142,13 +143,13 @@ func (s *Store) path(chunkID string) (string, error) {
 	return filepath.Join(s.root, chunkID+".chunk"), nil
 }
 
-// Stats returns the number of stored files and their total size in bytes.
+// Stats returns the number of stored chunks and their total size in bytes.
 func (s *Store) Stats() (chunkCount, usedBytes int64, err error) {
 	err = filepath.WalkDir(s.root, func(_ string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if !d.Type().IsRegular() {
+		if !d.Type().IsRegular() || !strings.HasSuffix(d.Name(), ".chunk") {
 			return nil
 		}
 		info, err := d.Info()
