@@ -143,7 +143,7 @@ func (c *Client) uploadChunk(ctx context.Context, cs gfspb.ChunkServerServiceCli
 	// Open a stream to the chunkserver
 	stream, err := cs.WriteChunk(ctx)
 	if err != nil {
-		return fmt.Errorf("Open Write Stream: %w", err)
+		return fmt.Errorf("open write stream: %w", err)
 	}
 
 	// Everyone after the first server: the primary forwards to them
@@ -168,7 +168,7 @@ func (c *Client) uploadChunk(ctx context.Context, cs gfspb.ChunkServerServiceCli
 		},
 	}
 	if err := stream.Send(header); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("Send Header: %w", err)
+		return fmt.Errorf("send header: %w", err)
 	}
 
 	// Send the data in 64Kb chunks
@@ -182,13 +182,13 @@ func (c *Client) uploadChunk(ctx context.Context, cs gfspb.ChunkServerServiceCli
 			if errors.Is(err, io.EOF) {
 				break // Server hung up/closed the stream
 			}
-			return fmt.Errorf("Send Data: %w", err)
+			return fmt.Errorf("send data: %w", err)
 		}
 	}
 
 	// Close Stream and Get Response
 	if _, err := stream.CloseAndRecv(); err != nil {
-		return fmt.Errorf("Write Chunk %s: %w", ref.ID, err)
+		return fmt.Errorf("write chunk %s: %w", ref.ID, err)
 	}
 
 	return nil
@@ -200,7 +200,7 @@ func (c *Client) uploadChunk(ctx context.Context, cs gfspb.ChunkServerServiceCli
 func (c *Client) Upload(ctx context.Context, localPath, remotePath string) (*FileInfo, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
-		return nil, fmt.Errorf("Open %s: %w", localPath, err)
+		return nil, fmt.Errorf("open %s: %w", localPath, err)
 	}
 	defer f.Close()
 
@@ -233,13 +233,13 @@ func (c *Client) Upload(ctx context.Context, localPath, remotePath string) (*Fil
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("Create File %s: %w", remotePath, err)
+		return nil, fmt.Errorf("create file %s: %w", remotePath, err)
 	}
 
 	// Rewind and upload each chunk where the coordinator said
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("Rewind %s: %w", localPath, err)
+		return nil, fmt.Errorf("rewind %s: %w", localPath, err)
 	}
 
 	info := &FileInfo{Path: remotePath, Size: size}
@@ -269,22 +269,22 @@ func (c *Client) downloadChunk(ctx context.Context, cs gfspb.ChunkServerServiceC
 	// Ask Server for the chunk
 	stream, err := cs.ReadChunk(ctx, &gfspb.ReadChunkRequest{ChunkId: ref.ID})
 	if err != nil {
-		return nil, fmt.Errorf("Open Read Stream %w", err)
+		return nil, fmt.Errorf("open read stream %w", err)
 	}
 
 	// First message should be a header
 	first, err := stream.Recv()
 	if err != nil {
-		return nil, fmt.Errorf("Read Header %s : %w", ref.ID, err)
+		return nil, fmt.Errorf("read header %s : %w", ref.ID, err)
 	}
 
 	header := first.GetHeader()
 	if header == nil {
-		return nil, fmt.Errorf("Read Chunk %s : first message was not header", ref.ID)
+		return nil, fmt.Errorf("read chunk %s: first message was not header", ref.ID)
 	}
 
 	if header.GetLength() != ref.Length {
-		return nil, fmt.Errorf("%w: chunk %s is %d bytes , expected %d", ErrChunkCorrupted, ref.ID, header.GetLength(), ref.Length)
+		return nil, fmt.Errorf("%w: chunk %s is %d bytes, expected %d", ErrChunkCorrupted, ref.ID, header.GetLength(), ref.Length)
 	}
 
 	// Collect data pieces until Server is done sending
@@ -295,7 +295,7 @@ func (c *Client) downloadChunk(ctx context.Context, cs gfspb.ChunkServerServiceC
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("Read chunk %s : %w", ref.ID, err)
+			return nil, fmt.Errorf("read chunk %s: %w", ref.ID, err)
 		}
 		data := msg.GetData()
 		if int64(len(buf)+len(data)) > ref.Length {

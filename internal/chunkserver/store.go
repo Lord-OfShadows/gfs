@@ -49,26 +49,26 @@ func (s *Store) Write(chunkID string, data []byte) error {
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		os.Remove(tmp)
-		return fmt.Errorf("Write Chunk %s : %w", chunkID, err)
+		return fmt.Errorf("write chunk %s: %w", chunkID, err)
 	}
 
 	// Force the data to disk (Not just remain in RAM)
 	if err := f.Sync(); err != nil {
 		f.Close()
 		os.Remove(tmp)
-		return fmt.Errorf("Sync Chunk %s : %w", chunkID, err)
+		return fmt.Errorf("sync chunk %s: %w", chunkID, err)
 	}
 
 	// Close the file
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
-		return fmt.Errorf("Close Chunk %s : %w", chunkID, err)
+		return fmt.Errorf("close chunk %s: %w", chunkID, err)
 	}
 
 	// Rename the temp file (Commit data)
 	if err := os.Rename(tmp, p); err != nil {
 		os.Remove(tmp)
-		return fmt.Errorf("Rename Chunk %s : %w", chunkID, err)
+		return fmt.Errorf("rename chunk %s: %w", chunkID, err)
 	}
 	return nil
 }
@@ -94,7 +94,7 @@ func (s *Store) Read(chunkID string) ([]byte, error) {
 
 	// any other error (disk error etc)
 	if err != nil {
-		return nil, fmt.Errorf("Read Chunk %s : %w", chunkID, err)
+		return nil, fmt.Errorf("read chunk %s: %w", chunkID, err)
 	}
 
 	return data, nil
@@ -119,7 +119,7 @@ func (s *Store) Delete(chunkID string) error {
 
 	// Any other error (disk error etc)
 	if err != nil {
-		return fmt.Errorf("Delete Chunk %s : %w", chunkID, err)
+		return fmt.Errorf("delete chunk %s: %w", chunkID, err)
 	}
 
 	return nil
@@ -129,7 +129,7 @@ func (s *Store) Delete(chunkID string) error {
 // empty or could escape the root (e.g. "../evil", "a/b", `a\b`).
 func (s *Store) path(chunkID string) (string, error) {
 	if chunkID == "" {
-		return "", fmt.Errorf("%w: Empty Chunk ID", ErrInvalidChunkID)
+		return "", fmt.Errorf("%w: empty chunk id", ErrInvalidChunkID)
 	}
 
 	for _, c := range chunkID {

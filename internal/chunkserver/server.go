@@ -105,11 +105,11 @@ func (s *Server) forwardChunk(ctx context.Context, info *gfspb.ChunkInfo, data [
 	// Connect to the next server in the chain
 	peer, err := s.peer(next.GetAddress())
 	if err != nil {
-		return fmt.Errorf("Connect to %s: %w", next.GetAddress(), err)
+		return fmt.Errorf("connect to %s: %w", next.GetAddress(), err)
 	}
 	stream, err := peer.WriteChunk(ctx)
 	if err != nil {
-		return fmt.Errorf("Open Stream to %s: %w", next.GetAddress(), err)
+		return fmt.Errorf("open stream to %s: %w", next.GetAddress(), err)
 	}
 
 	// Header: Same Chunk info , and "you forward it to the REST of the chain"
@@ -123,7 +123,7 @@ func (s *Server) forwardChunk(ctx context.Context, info *gfspb.ChunkInfo, data [
 	}
 
 	if err := stream.Send(header); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("Send Header to %s: %w", next.GetAddress(), err)
+		return fmt.Errorf("send header to %s: %w", next.GetAddress(), err)
 	}
 
 	// Data in 64Kb pieces
@@ -137,7 +137,7 @@ func (s *Server) forwardChunk(ctx context.Context, info *gfspb.ChunkInfo, data [
 			if errors.Is(err, io.EOF) {
 				break // next server hung up; Real error comes from CloseAndRecv
 			}
-			return fmt.Errorf("Send Data to %s: %w", next.GetAddress(), err)
+			return fmt.Errorf("send data to %s: %w", next.GetAddress(), err)
 		}
 	}
 
@@ -231,7 +231,7 @@ func (s *Server) CopyChunk(ctx context.Context, req *gfspb.CopyChunkRequest) (*g
 	// 1. Pull the chunk from the healthy source
 	data, err := s.pullChunk(ctx, src, info.GetChunkId())
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "pull  chunk %s from %s: %v", info.GetChunkId(), src, err)
+		return nil, status.Errorf(codes.Unavailable, "pull chunk %s from %s: %v", info.GetChunkId(), src, err)
 	}
 
 	// 2. Verify against the coordinator's recorded size and checksum
@@ -271,7 +271,7 @@ func (s *Server) WriteChunk(stream grpc.ClientStreamingServer[gfspb.WriteChunkRe
 
 	header := first.GetHeader()
 	if header == nil || header.GetChunk() == nil {
-		return status.Error(codes.InvalidArgument, "First message must be a header with chunk info")
+		return status.Error(codes.InvalidArgument, "first message must be a header with chunk info")
 	}
 
 	info := header.GetChunk()
@@ -309,7 +309,7 @@ func (s *Server) WriteChunk(stream grpc.ClientStreamingServer[gfspb.WriteChunkRe
 
 	sum := sha256.Sum256(buf)
 	if !bytes.Equal(sum[:], info.GetChecksum()) {
-		return status.Error(codes.DataLoss, "checksum mismatch ;  Data corrupted in transit")
+		return status.Error(codes.DataLoss, "checksum mismatch: data corrupted in transit")
 	}
 
 	// Save to Disk; Then Reply
